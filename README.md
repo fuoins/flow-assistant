@@ -36,7 +36,7 @@ keytool -genkeypair -v -keystore debug.keystore -alias debug -keyalg RSA -keysiz
 
 - v1.8：测速源选择器 UI 升级、应用更名「流量助手」
 - v1.7：原生滑块验证、全新会话防风控、登录/启动取数进度反馈
-- 安装包见 `release/流量助手-v1.8.apk`
+- 安装包见 `release/flow-assistant-v1.8.apk`
 
 ## 声明
 
