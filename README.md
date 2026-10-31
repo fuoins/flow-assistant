@@ -1,9 +1,10 @@
 <div align="center">
   <img src="assets/banner.png" alt="流量助手 · Flow Assistant" width="100%">
   <br><br>
+  <a href="https://github.com/fuoins/flow-assistant/releases/latest"><img src="https://img.shields.io/badge/下载-APK%20v1.8-0B6BFF?style=flat-square&logo=android&logoColor=white" alt="Download APK"></a>
   <a href="#快速开始"><img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android"></a>
   <a href="#工作原理"><img src="https://img.shields.io/badge/Java-100%25-E76F00?style=flat-square&logo=openjdk&logoColor=white" alt="Java"></a>
-  <a href="#版本记录"><img src="https://img.shields.io/badge/version-1.8-0B6BFF?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/fuoins/flow-assistant/releases"><img src="https://img.shields.io/badge/version-1.8-0B6BFF?style=flat-square" alt="Version"></a>
   <a href="#工作原理"><img src="https://img.shields.io/badge/依赖-0-0E9F6E?style=flat-square" alt="Dependencies"></a>
   <a href="#声明"><img src="https://img.shields.io/badge/用途-学习交流-64748B?style=flat-square" alt="License"></a>
   <br><br>
@@ -93,13 +94,17 @@ flowchart LR
   class B,C,E,F soft
 ```
 
-**三个取舍**
+### 三个取舍
 
 - **用隐藏 WebView 而不是逆向接口**：登录、风控、取数全部跟随官方流程，页面改版时只需调整抽取选择器，不必重写鉴权。
 - **纯原生、零依赖**：单文件 `Activity` 手写布局，不引第三方 UI / 网络 / 图片库，APK 体积与启动开销都可控。
 - **没有后端**：手机号、Cookie、配置全部留在本机，测速源与领取入口通过一份公开 JSON 下发。
 
 ## 快速开始
+
+### 直接安装
+
+前往 [Releases](https://github.com/fuoins/flow-assistant/releases/latest) 下载 `flow-assistant-v1.8.apk`，在手机上允许「安装未知来源应用」后安装。首次启动需要登录中国移动账号（短信验证码）。
 
 ### 环境要求
 
@@ -112,7 +117,7 @@ flowchart LR
 
 > 运行前提：一张可接收短信的中国移动手机号，以及 Android 7.0 及以上的设备。
 
-### 构建
+### 从源码构建
 
 仓库里的 `build.sh` 是作者本机的一键脚本，顶部 `WS` 写死了工作区路径，直接运行前需要改成你自己的目录。也可以直接在仓库根目录执行下面这组命令：
 
