@@ -1,42 +1,218 @@
-# 流量助手
+<div align="center">
+  <img src="assets/banner.png" alt="流量助手 · Flow Assistant" width="100%">
+  <br><br>
+  <a href="#快速开始"><img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android"></a>
+  <a href="#工作原理"><img src="https://img.shields.io/badge/Java-100%25-E76F00?style=flat-square&logo=openjdk&logoColor=white" alt="Java"></a>
+  <a href="#版本记录"><img src="https://img.shields.io/badge/version-1.8-0B6BFF?style=flat-square" alt="Version"></a>
+  <a href="#工作原理"><img src="https://img.shields.io/badge/依赖-0-0E9F6E?style=flat-square" alt="Dependencies"></a>
+  <a href="#声明"><img src="https://img.shields.io/badge/用途-学习交流-64748B?style=flat-square" alt="License"></a>
+  <br><br>
+  <b>官方登录态直接查余量 · 按套餐类别分组汇总 · 4 线程消耗测速 · 领取入口远程可配</b>
+  <br><br>
+  <a href="#功能特性">功能特性</a> ·
+  <a href="#界面预览">界面预览</a> ·
+  <a href="#工作原理">工作原理</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#配置说明">配置说明</a> ·
+  <a href="#常见问题">常见问题</a> ·
+  <a href="#版本记录">版本记录</a>
+</div>
 
-中国移动流量查询助手（Android 原生应用）。登录中国移动官方账号后，自动查询流量余量并按套餐分组汇总；内置多线程流量消耗测速与定向流量领取入口，全程原生界面，不显示官方网页。
+<br>
 
-## 功能
+> 中国移动的流量余量从来不在一张表里：通用流量、咪咕系定向流量、云盘/快游专属包各自独立计费，官方页面只按套餐逐条罗列，看不出「我到底还剩多少、哪一类快用完了」。
+>
+> 流量助手把这些条目抓下来，按类别合并成几张卡片，一屏看清；顺手把「怎么把定向流量用掉」和「哪里还能领流量」放进同一个页面。
 
-- **流量查询与汇总**：隐藏 WebView 复用官方登录态，自动抓取 `flowquery` 流量明细，按「通用流量 / 咪咕视频 / 移动云盘 / 咪咕快游 / 其他 APP 专属」分组汇总，两列小卡展示剩余/总量/已用，点击展开套餐明细
-- **登录**：原生登录界面（仅短信验证码登录，协议默认勾选），原生滑块验证（复刻官方 tianai-captcha 协议），Cookie 持久化保持登录态，重启直进流量页
-- **流量消耗测速**：4 线程并发下载指定测速源，实时统计已消耗流量；测速源与流量领取链接支持外部 JSON 配置（`speed_sources` + `claim_groups`），失败自动回退内置默认
-- **流量领取**：内置辽宁专属活动 + 全国通用定向流量（咪咕视频/快游/阅读/音乐/云盘等）领取入口
-- 纯原生 UI：渐变头部、卡片折叠、进度条、自定义滑块验证，全程不显示官方网页
+## 功能特性
 
-## 技术要点
+| 模块 | 做什么 | 实现要点 |
+| :--- | :--- | :--- |
+| **余量** | 登录后自动拉取全部套餐，按类别汇总剩余 / 总量 / 已用 | 隐藏 WebView 复用官方会话，注入 JS 解析套餐 DOM |
+| **登录** | 手机号 + 短信验证码，滑块验证在原生层完成 | 复刻官方 `tianai-captcha`：取图 → 拖动轨迹 → 校验 → 回调发码 |
+| **测速** | 4 线程并发下载，实时统计已用流量，达阈值自动停止 | `HttpURLConnection` + 64 KB 缓冲，禁用缓存、随机参数防命中 |
+| **领取** | 内置辽宁活动与全国定向流量入口，配置可远程整体替换 | 外部 `flow.json` 下发 `claim_groups` |
 
-- 原生 Java 实现，无第三方依赖（`HttpURLConnection` + 原生控件）
-- WebView 仅作隐藏会话容器：登录/滑块/取数全部在后台完成
-- 滑块验证完全复刻官方协议：`/genCaptcha` 取图 → 原生拖动 → `/check` 提交轨迹 → 回调官方 `sendsms` 发短信
-- 登录跳转看门狗：官方跳转链卡住时自动直达流量页
+### 余量查询与分组
 
-## 构建
+抓取 `flowquery.html` 中的套餐条目（名称、类别、已用、剩余、总量），统一换算成 GB 后按规则归并：
 
-需要 JDK 17 与 Android SDK（platform 34 / build-tools 34.0.0）：
+| 分组 | 归类规则 | 卡片标识 |
+| :--- | :--- | :--- |
+| 通用流量 | 套餐类别包含「通用」 | 绿 · 通 |
+| 咪咕视频 | APP 专属，且名称含「咪咕视频」 | 红 · 视 |
+| 移动云盘 | APP 专属，且名称含「云盘」 | 橙 · 盘 |
+| 咪咕快游 | APP 专属，且名称含「咪咕快游」 | 紫 · 游 |
+| 其他 APP 专属 | 其余的 APP 专属套餐 | 灰 · 专 |
+| 其他流量 | 未命中以上任何规则 | 灰 · 专 |
 
-```bash
-./build.sh
-# 产物输出到 build/流量助手.apk
+展示顺序为「总合计 → 通用流量 → APP 专属合计 → 各类定向」，点击任意小卡可展开该类别下的套餐明细。单位自动在 KB / MB / GB / TB 之间切换；抽取失败会重试 5 次（间隔 1.5 秒），仍为空则自动重载页面 2 次。
+
+### 登录与会话
+
+- **仅短信验证码登录**，服务协议默认勾选，手机号可记住并在下次启动时回填。
+- **原生滑块验证**：`POST /genCaptcha` 取背景图与拼图块，本地记录拖动轨迹（含起止时间戳与位移百分比），`POST /check` 提交，成功后回调官方 `sendsms` 触发短信。
+- **登录态本地保存**：Cookie 备份到 `SharedPreferences("flow_cookies")`，启动时回填到 `touch / login / wap / shop` 等域名，有效则直接进入余量页。
+- **跳转看门狗**：提交登录后约 7.2 秒仍未落到目标页，直接跳转流量页，避免卡在官方跳转链。
+
+### 消耗测速
+
+- 测速源带类型标签（通用 / 定向），卡片式选择器弹窗单选。
+- 4 个线程各自循环下载，实时累计接收字节，每秒刷新一次读数。
+- 可填写「自动停止阈值」（GB），达到后自动停止并断开全部活动连接。
+- 支持一键重置计数，开始消耗时显示当前出口 IP 与归属地，便于确认走的是蜂窝网络。
+
+### 流量领取
+
+默认内置 1 个辽宁专属活动与 6 个全国通用定向流量入口（咪咕视频、咪咕快游、咪咕阅读、咪咕音乐、移动云盘、咪咕悦看），点击用系统浏览器打开官方活动页；整套入口也可由远程配置替换成你所在省份的活动。
+
+## 界面预览
+
+<p align="center">
+  <img src="assets/preview.png" alt="登录 / 余量总览 / 消耗与领取" width="100%">
+</p>
+
+<p align="center"><sub>界面示意：按当前源码的布局、配色与文案绘制</sub></p>
+
+- **头部即结论**：剩余量、已消耗、使用进度与上次刷新时间都在第一张卡里，不用滚动。
+- **两列小卡**：每类流量一张卡，剩余 / 总量 / 进度一目了然，点击展开套餐明细。
+- **同页完成**：往下就是消耗测速与流量领取，不跳转、不打开官方网页。
+
+## 工作原理
+
+```mermaid
+flowchart LR
+  A["原生登录页"] --> B["隐藏 WebView<br/>复用官方会话"]
+  B --> C["注入 JS<br/>抽取套餐明细"]
+  C --> D["按类别聚合<br/>原生卡片渲染"]
+  D --> E["消耗测速<br/>4 线程 · 阈值停止"]
+  D --> F["流量领取<br/>入口远程下发"]
+  classDef accent fill:#0B6BFF,stroke:#0B6BFF,color:#FFFFFF
+  classDef soft fill:#EDF4FF,stroke:#BBD5FF,color:#14243C
+  class A,D accent
+  class B,C,E,F soft
 ```
 
-签名使用 `debug.keystore`（未随仓库分发，请自行生成或使用自建签名）：
+**三个取舍**
+
+- **用隐藏 WebView 而不是逆向接口**：登录、风控、取数全部跟随官方流程，页面改版时只需调整抽取选择器，不必重写鉴权。
+- **纯原生、零依赖**：单文件 `Activity` 手写布局，不引第三方 UI / 网络 / 图片库，APK 体积与启动开销都可控。
+- **没有后端**：手机号、Cookie、配置全部留在本机，测速源与领取入口通过一份公开 JSON 下发。
+
+## 快速开始
+
+### 环境要求
+
+| 依赖 | 版本 | 用途 |
+| :--- | :--- | :--- |
+| JDK | 17 | 编译源码，`build.sh` 通过 `JAVA_HOME` 指定 |
+| Android SDK Platform | 34 | 提供编译期 `android.jar` |
+| Android Build Tools | 34.0.0 | `aapt2` / `d8` / `zipalign` / `apksigner` |
+| 最低运行系统 | Android 7.0（API 24） | 对应 `minSdkVersion 24` |
+
+> 运行前提：一张可接收短信的中国移动手机号，以及 Android 7.0 及以上的设备。
+
+### 构建
+
+仓库里的 `build.sh` 是作者本机的一键脚本，顶部 `WS` 写死了工作区路径，直接运行前需要改成你自己的目录。也可以直接在仓库根目录执行下面这组命令：
+
+<details>
+<summary>展开完整构建命令</summary>
 
 ```bash
-keytool -genkeypair -v -keystore debug.keystore -alias debug -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android
+export JAVA_HOME=/path/to/jdk17
+export ANDROID_HOME=/path/to/android-sdk
+BT="$ANDROID_HOME/build-tools/34.0.0"
+JAR="$ANDROID_HOME/platforms/android-34/android.jar"
+
+rm -rf obj dex build && mkdir -p obj dex build
+javac -cp "$JAR" -d obj src/com/cmcc/flowapp/*.java
+"$BT/d8" --release --lib "$JAR" --output dex $(find obj -name '*.class')
+"$BT/aapt2" compile --dir res -o build/res.zip
+"$BT/aapt2" link -o build/base.apk -I "$JAR" \
+  --manifest AndroidManifest.xml build/res.zip --auto-add-overlay
+(cd dex && zip -q ../build/base.apk classes.dex)
+"$BT/zipalign" -f 4 build/base.apk build/aligned.apk
+
+# 首次构建会自动生成 debug.keystore
+keytool -genkeypair -v -keystore debug.keystore -alias debug \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
+"$BT/apksigner" sign --ks debug.keystore --ks-key-alias debug \
+  --ks-pass pass:android --key-pass pass:android \
+  --out "build/流量助手.apk" build/aligned.apk
 ```
 
-## 版本
+</details>
 
-- v1.8：测速源选择器 UI 升级、应用更名「流量助手」
-- v1.7：原生滑块验证、全新会话防风控、登录/启动取数进度反馈
+产物为 `build/流量助手.apk`，使用 debug 签名，仅供自用安装；如需上架或长期分发，请换成自己的正式签名。
+
+## 配置说明
+
+应用启动时会拉取 `MainActivity.CONFIG_URL` 指向的 JSON（默认 `https://zy520.de5.net/flow.json`，超时 10 秒，HTTPS 失败自动回退 HTTP）。拉取失败或字段为空时，继续使用代码内置的默认测速源与领取入口。
+
+```json
+{
+  "speed_sources": [
+    { "name": "今日头条", "url": "https://example.com/video.mp4", "type": "通用" },
+    { "name": "移动云盘", "url": "https://example.com/big.zip", "type": "定向" }
+  ],
+  "claim_groups": [
+    {
+      "title": "全国通用定向流量",
+      "links": [
+        { "name": "30GB 咪咕视频定向流量", "url": "https://example.com/claim" }
+      ]
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| `speed_sources[].name` | string | 测速源显示名称 |
+| `speed_sources[].url` | string | 直链下载地址，建议大文件或长视频流 |
+| `speed_sources[].type` | string | `通用` / `定向`，仅拼在名称后作提示 |
+| `claim_groups[].title` | string | 领取入口的分组标题 |
+| `claim_groups[].links[].name` | string | 入口名称，如「30GB 咪咕音乐定向流量」 |
+| `claim_groups[].links[].url` | string | 活动页地址，点击后用系统浏览器打开 |
+
+> 测速源会以 4 线程反复下载，请使用自己有权访问、且允许这样访问的资源；体积太小的文件很快就能下完，很难持续产生流量。
+
+## 项目结构
+
+```
+flow-assistant/
+├── AndroidManifest.xml    # 单 Activity · minSdk 24 / target 34
+├── build.sh               # javac → d8 → aapt2 → zipalign → apksigner
+├── res/
+│   └── drawable/icon.png  # 应用图标
+├── src/com/cmcc/flowapp/
+│   └── MainActivity.java  # 全部界面与逻辑（约 2.4k 行）
+├── assets/                # README 配图
+└── README.md
+```
+
+## 常见问题
+
+| 现象 | 可能原因 | 处理 |
+| :--- | :--- | :--- |
+| 一直停在登录页 / 转圈 | Cookie 过期，或官方跳转链变化 | 点「刷新」重试；仍不行则「退出」后重新登录 |
+| 余量显示 `--`、提示未获取到数据 | 页面结构调整、网络异常 | 先刷新；持续出现需要同步更新抽取脚本的选择器 |
+| 滑块验证反复失败 | 触发官方风控 | 换网络环境、隔几分钟再试；验证码本身有失败重试次数 |
+| 测速统计与运营商计费不一致 | 统计口径不同 | 客户端只统计接收字节，计费还包含协议开销与计费周期差异，以运营商为准 |
+| 不在辽宁，能用吗 | 领取入口有地域性 | 查询走全国统一入口，通常不受省份限制；领取入口可用远程配置替换成本省活动 |
+| 会不会上传我的数据 | — | 没有后端，手机号与 Cookie 只写在本机 `SharedPreferences` |
+
+## 版本记录
+
+- **v1.8**（当前）— 测速源选择器改为卡片式弹窗单选；应用更名「流量助手」
+- **v1.7** — 原生滑块验证；全新会话防风控；登录与启动取数的进度反馈
 
 ## 声明
 
-本项目仅供学习交流。流量数据来源于中国移动官方页面，消耗测速请合理使用，定向流量识别以运营商计费为准。
+> 本项目仅供学习与技术交流，请勿用于商业用途。流量数据来源于中国移动官方页面，消耗测速请合理使用，定向流量的识别与计费以运营商为准。因使用本工具产生的任何后果由使用者自行承担。
+
+<div align="center">
+  <sub>如果这个项目对你有帮助，欢迎点一个 Star</sub>
+</div>
