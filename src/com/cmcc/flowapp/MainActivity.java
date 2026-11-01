@@ -166,9 +166,12 @@ public class MainActivity extends Activity {
     private final Runnable loadTimeoutRunnable = new Runnable() {
         @Override public void run() {
             hideLoading();
-            if (!hasSavedCookie()) {
+            if (lastItems == null || lastItems.isEmpty()) {
+                // 从没取到过数据：登录态很可能失效，回登录页
                 showLoginScreen();
+                Toast.makeText(MainActivity.this, "加载超时，请重新登录", Toast.LENGTH_SHORT).show();
             } else {
+                // 已有历史数据：只是本次加载失败，回主界面提示
                 showNative();
                 if (statusLine != null) statusLine.setText("加载超时，请点「刷新」重试");
             }
@@ -198,9 +201,16 @@ public class MainActivity extends Activity {
         fetchConfig();
 
         showNative();
-        showLoading("正在加载流量数据…");
-        armLoadTimeout();
-        web.loadUrl(FLOW_URL);   // cookie 有效则后台直取，无效则落到登录页（隐藏）
+        if (hasSavedCookie()) {
+            // 有登录态：后台直取流量页，失败会落到登录页
+            showLoading("正在加载流量数据…");
+            armLoadTimeout();
+            web.loadUrl(FLOW_URL);
+        } else {
+            // 无登录态：直接进登录页，不绕流量页重定向
+            web.loadUrl(LOGIN_URL);
+            showLoginScreen();
+        }
     }
 
     /* ================= 默认配置（外部配置拉取失败时兜底） ================= */
@@ -261,13 +271,19 @@ public class MainActivity extends Activity {
                     showLoading("正在获取流量数据…");
                     scheduleExtract();
                 } else if (isWapHome(url)) {
-                    // 登录成功落到 WAP 首页：跳过掌厅首页中转，直接取流量页
+                    // 登录成功落到 WAP 首页：结束登录轮询，直接取流量页
+                    stopPoll();
+                    pendingSms = false;
+                    pendingLogin = false;
+                    resetLoginBtns();
                     web.loadUrl(FLOW_URL);
                 } else if (isPage(url, "touch.10086.cn/i/mobile/home.html")) {
                     web.loadUrl(FLOW_URL);
                 } else if (pendingLogin && !isLoginPage(url)) {
                     // 登录后官方跳转链中途页面：不再等它，直接进流量页
+                    stopPoll();
                     pendingLogin = false;
+                    resetLoginBtns();
                     web.loadUrl(FLOW_URL);
                 } else if (isLoginPage(url)) {
                     if (pendingSms) { requestCaptcha(); }
@@ -670,6 +686,7 @@ public class MainActivity extends Activity {
         loginBtn.setEnabled(false);
         loginBtn.setText("登录中…");
         showLoading("正在登录，请稍候…");
+        armLoadTimeout();
         if (onLoginPageNow()) submitLogin();
         else web.loadUrl(LOGIN_URL);
         startPoll();
