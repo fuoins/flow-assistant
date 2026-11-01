@@ -56,7 +56,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 流量查询助手 v1.9.5
+ * 流量查询助手 v1.9.6
  * - 原生短信登录与流量余量展示
  * - 隐藏 WebView 仅访问指定余量查询入口，并通过页面 DOM 状态读取数据
  * - 消耗流量上方区域（头部+汇总卡）压缩至约半屏
@@ -154,8 +154,8 @@ public class MainActivity extends Activity {
         buildLoginScreen();
         buildLoadingOverlay();
         fetchConfig();
-        showLoginScreen();
-        loadEntry("正在打开流量查询…", false);
+        showNative();
+        loadEntry("正在检查登录状态…", true);
     }
 
     @Override

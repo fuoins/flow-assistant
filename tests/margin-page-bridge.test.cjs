@@ -8,6 +8,8 @@ const vm = require('node:vm');
 
 const javaPath = path.resolve(__dirname, '../src/com/cmcc/flowapp/MarginPageBridge.java');
 const java = fs.readFileSync(javaPath, 'utf8');
+const activityPath = path.resolve(__dirname, '../src/com/cmcc/flowapp/MainActivity.java');
+const activity = fs.readFileSync(activityPath, 'utf8');
 
 function extractJavaString(field) {
   const re = new RegExp('(?:static\\s+)?(?:final\\s+)?String\\s+' + field + '\\s*=');
@@ -49,6 +51,16 @@ function test(name, fn) {
     throw err;
   }
 }
+
+test('startup probes the existing session before showing the SMS login form', () => {
+  const start = activity.indexOf('protected void onCreate');
+  const end = activity.indexOf('public void onBackPressed', start);
+  assert.ok(start >= 0 && end > start, 'Could not locate MainActivity startup');
+  const onCreate = activity.slice(start, end);
+  assert.doesNotMatch(onCreate, /showLoginScreen\s*\(/);
+  assert.match(onCreate, /showNative\s*\(\)/);
+  assert.match(onCreate, /loadEntry\("正在检查登录状态…",\s*true\)/);
+});
 
 class FakeEvent {
   constructor(type, init) {
