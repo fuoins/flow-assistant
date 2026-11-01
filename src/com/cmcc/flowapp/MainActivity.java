@@ -107,6 +107,7 @@ public class MainActivity extends Activity {
     private int latestSmsSeconds = 0;
     private int partialProbeCount = 0;
     private boolean partialRendered = false;
+    private boolean refreshInProgress = false;
     private long probeDeadline = 0L;
     private int probeGeneration = 0;
     private Runnable probeRunnable;
@@ -275,6 +276,7 @@ public class MainActivity extends Activity {
     private void loadEntry(String message, boolean showProgress) {
         stopProbe();
         probeGeneration++;
+        refreshInProgress = "正在更新流量余量…".equals(message);
         pendingSms = false;
         pendingLogin = false;
         smsCommanded = false;
@@ -309,6 +311,7 @@ public class MainActivity extends Activity {
         if (probeRunnable != null) uiHandler.removeCallbacks(probeRunnable);
         probeRunnable = null;
         probeGeneration++;
+        refreshInProgress = false;
     }
 
     private void runProbe(final int generation) {
@@ -392,7 +395,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (authenticated || "loading".equals(state)) {
-            if (authenticated) showLoading("登录成功，正在加载流量数据…");
+            if (authenticated) showLoading(refreshInProgress ? "正在更新流量余量…" : "登录成功，正在加载流量数据…");
             else if (pendingLogin) showLoading("正在验证短信随机码…");
             else showLoading("正在加载流量数据…");
             scheduleProbe(generation, 1200);
@@ -1224,10 +1227,9 @@ public class MainActivity extends Activity {
     /* ================= 余量刷新（始终仅访问指定流量入口） ================= */
 
     private void refreshFlow() {
-        boolean hasCurrentData = lastItems != null && !lastItems.isEmpty();
-        statusLine.setText(hasCurrentData ? "正在刷新，暂时保留当前数据…" : "正在刷新流量余量…");
+        statusLine.setText("正在更新流量余量…");
         showNative();
-        loadEntry("正在刷新流量数据…", !hasCurrentData);
+        loadEntry("正在更新流量余量…", true);
     }
 
     /* ================= 汇总与展示 ================= */

@@ -62,15 +62,20 @@ test('startup probes the existing session before showing the SMS login form', ()
   assert.match(onCreate, /loadEntry\("正在检查登录状态…",\s*true\)/);
 });
 
-test('manual refresh keeps current data visible while fetching updated values', () => {
+test('manual refresh reloads normally and uses neutral copy for an existing session', () => {
   const start = activity.indexOf('private void refreshFlow()');
-  const end = activity.indexOf('/* ================= 汇总与展示 ================= */', start);
+  const end = activity.indexOf('/* ================= 汇总与展示 ===============', start);
   assert.ok(start >= 0 && end > start, 'Could not locate manual refresh');
   const refresh = activity.slice(start, end);
-  assert.match(refresh, /lastItems\s*!=\s*null\s*&&\s*!lastItems\.isEmpty\(\)/);
-  assert.match(refresh, /showNative\s*\(\)/);
-  assert.match(refresh, /loadEntry\("正在刷新流量数据…",\s*!hasCurrentData\)/);
-  assert.doesNotMatch(refresh, /showLoading\s*\(/);
+  assert.match(refresh, /statusLine\.setText\("正在更新流量余量…"\)/);
+  assert.match(refresh, /loadEntry\("正在更新流量余量…",\s*true\)/);
+  assert.doesNotMatch(refresh, /hasCurrentData|lastItems/);
+  assert.match(activity, /refreshInProgress = "正在更新流量余量…"\.equals\(message\)/);
+  const probeStart = activity.indexOf('if (authenticated || "loading".equals(state))');
+  const probeEnd = activity.indexOf('if ("login".equals(state))', probeStart);
+  assert.ok(probeStart >= 0 && probeEnd > probeStart, 'Could not locate probe status handling');
+  const status = activity.slice(probeStart, probeEnd);
+  assert.match(status, /refreshInProgress\s*\?\s*"正在更新流量余量…"\s*:\s*"登录成功，正在加载流量数据…"/);
 });
 
 class FakeEvent {
