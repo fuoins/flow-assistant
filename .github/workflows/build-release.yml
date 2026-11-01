@@ -16,6 +16,9 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 新页面桥接离线回归测试
+        run: node tests/margin-page-bridge.test.cjs
+
       - name: 安装 JDK 17
         uses: actions/setup-java@v4
         with:

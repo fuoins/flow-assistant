@@ -56,18 +56,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 流量查询助手 v1.9.4
- * - 原生登录界面（仿官方登录页元素：短信/密码双tab、验证码、协议、记住账号）
- * - 登录使用官方 WebView；短信验证码与风控验证由官方页面处理
- * - 余量查询仍使用隐藏 WebView，不显示流量详情网页
+ * 流量查询助手 v1.9.5
+ * - 原生短信登录与流量余量展示
+ * - 隐藏 WebView 仅访问指定余量查询入口，并通过页面 DOM 状态读取数据
  * - 消耗流量上方区域（头部+汇总卡）压缩至约半屏
  */
 public class MainActivity extends Activity {
 
-    private static final String LOGIN_URL =
-            "https://login.10086.cn/html/login/touch.html?channelID=12022&backUrl=https://wap.10086.cn/bj/index_100_100.html";
-    private static final String FLOW_URL = "https://wx.10086.cn/cmcc-service/app-pages/main/marginQuery?customize_path_param=72&channelId=P00000132553&yx=1418961133";
-    private static final String TOUCH_HOME = "https://touch.10086.cn/i/mobile/home.html";
     private static final String CONFIG_URL = "https://zy520.de5.net/flow.json";
     private static final String UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
 
@@ -102,23 +97,24 @@ public class MainActivity extends Activity {
 
     /* ---------- 原生登录界面 ---------- */
     private LinearLayout loginScreen;
-    private EditText phoneInput, smsInput, pwdInput;
+    private EditText phoneInput, smsInput;
     private Button getSmsBtn, loginBtn;
     private TextView loginErrorText;
-    private boolean smsMode = true;
-    /** 协议与记住账号默认全部勾选（勾选框已隐藏） */
-    private final boolean[] agree1 = {true}, agree2 = {true}, remember = {true};
-    private boolean pendingSms = false, pendingLogin = false, pollRunning = false;
-    private int pollTicks = 0;
-    private Runnable loginWatchdog;
-    private int loginWatchdogTicks = 0;
+    private final boolean[] remember = {true};
+    private boolean pendingSms = false, pendingLogin = false;
+    private boolean smsCommanded = false, loginCommanded = false;
+    private boolean smsCountdownActive = false;
+    private int latestSmsSeconds = 0;
+    private int partialProbeCount = 0;
+    private boolean partialRendered = false;
+    private long probeDeadline = 0L;
+    private int probeGeneration = 0;
+    private Runnable probeRunnable;
 
     /* 过渡加载层 */
     private FrameLayout loadingOverlay;
     private TextView loadingText;
 
-    private String lastUrl = "";
-    private Runnable pollRunnable;
     private int countdownLeft = 0;
     private Runnable countdownRunnable;
 
@@ -138,67 +134,38 @@ public class MainActivity extends Activity {
     private List<String[]> sources = new ArrayList<>();
     private List<String[]> defaultClaims = new ArrayList<>();
 
-    /* ---------- 提取 ---------- */
-    private int extractTries = 0;
-    private int autoReloads = 0;
-    private int flowLoadFailCount = 0;
-
-    /* ---------- 加载超时兜底：页面加载失败/卡死时，避免一直停在加载层 ---------- */
-    private final Runnable loadTimeoutRunnable = new Runnable() {
-        @Override public void run() {
-            hideLoading();
-            if (lastItems == null || lastItems.isEmpty()) {
-                // 从没取到过数据：登录态很可能失效，回登录页
-                showLoginScreen();
-                Toast.makeText(MainActivity.this, "加载超时，请重新登录", Toast.LENGTH_SHORT).show();
-            } else {
-                // 已有历史数据：只是本次加载失败，回主界面提示
-                showNative();
-                if (statusLine != null) statusLine.setText("加载超时，请点「刷新」重试");
-            }
-        }
-    };
+    /* ---------- 数据探测 ---------- */
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         if (android.os.Build.VERSION.SDK_INT >= 21) {
             getWindow().setStatusBarColor(PRIMARY);
-            if (android.os.Build.VERSION.SDK_INT >= 23) {
-                getWindow().getDecorView().setSystemUiVisibility(0);
-            }
+            if (android.os.Build.VERSION.SDK_INT >= 23) getWindow().getDecorView().setSystemUiVisibility(0);
         }
         container = new FrameLayout(this);
         container.setBackgroundColor(BG);
         setContentView(container);
-
+        // 删除历史版本保存的跨域 Cookie 副本；WebView 自身 Cookie 由系统持久化。
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("cookies").apply();
         buildDefaults();
         buildWebView();
-        restoreCookies();
         buildNativeScreen();
         buildLoginScreen();
         buildLoadingOverlay();
         fetchConfig();
-
-        showNative();
-        if (hasSavedCookie()) {
-            // 有登录态：后台直取流量页，失败会落到登录页
-            showLoading("正在加载流量数据…");
-            armLoadTimeout();
-            web.loadUrl(FLOW_URL);
-        } else {
-            // 无登录态：直接进登录页，不绕流量页重定向
-            web.loadUrl(LOGIN_URL);
-            showLoginScreen();
-        }
+        showLoginScreen();
+        loadEntry("正在打开流量查询…", false);
     }
 
     @Override
     public void onBackPressed() {
-        if (web != null && web.getVisibility() == View.VISIBLE && (pendingSms || pendingLogin)) {
-            stopPoll();
+        if (pendingSms || pendingLogin) {
             pendingSms = false;
             pendingLogin = false;
+            smsCommanded = false;
+            loginCommanded = false;
+            stopProbe();
             resetLoginBtns();
             showLoginScreen();
             return;
@@ -231,144 +198,289 @@ public class MainActivity extends Activity {
         defaultClaims.add(new String[]{"全国通用定向流量", "30GB 移动云盘定向流量", "https://caiyun.feixin.10086.cn:7071/portal/caiyunOfficialAccount/index.html?path=zeroPurchase&sourceid=1283#/zeroPurchase"});
     }
 
-    /* ================= WebView（登录 + 后台取数，全程隐藏） ================= */
+    /* ================= WebView（仅加载流量查询入口，后台隐藏） ================= */
 
     private void buildWebView() {
         web = new WebView(this);
-        WebSettings s = web.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);
-        s.setDatabaseEnabled(true);
-        s.setUserAgentString("Mozilla/5.0 (Linux; Android 12; Pixel 6) " +
+        WebSettings settings = web.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
+        settings.setAllowFileAccessFromFileURLs(false);
+        settings.setAllowUniversalAccessFromFileURLs(false);
+        if (android.os.Build.VERSION.SDK_INT >= 21) {
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        }
+        settings.setUserAgentString("Mozilla/5.0 (Linux; Android 12; Pixel 6) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36");
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true);
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                return false;
+                return !isEntryUrl(url);
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                if (request == null || !request.isForMainFrame()) return false;
+                return !isEntryUrl(request.getUrl() == null ? null : request.getUrl().toString());
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                lastUrl = url == null ? "" : url;
-                saveCookies();
-                if (isFlowPage(url)) {
-                    stopPoll();
-                    resetLoginBtns();
-                    pendingSms = false;
-                    pendingLogin = false;
-                    extractTries = 0;
-                    flowLoadFailCount = 0;
-                    disarmLoadTimeout();
-                    showLoading("正在获取流量数据…");
-                    scheduleExtract();
-                } else if (isWapHome(url)) {
-                    // 登录成功落到 WAP 首页：结束登录轮询，直接取流量页
-                    stopPoll();
-                    pendingSms = false;
-                    pendingLogin = false;
-                    resetLoginBtns();
-                    web.loadUrl(FLOW_URL);
-                } else if (isPage(url, "touch.10086.cn/i/mobile/home.html")) {
-                    web.loadUrl(FLOW_URL);
-                } else if (pendingLogin && !isLoginPage(url)) {
-                    // 登录后官方跳转链中途页面：不再等它，直接进流量页
-                    stopPoll();
-                    pendingLogin = false;
-                    resetLoginBtns();
-                    web.loadUrl(FLOW_URL);
-                } else if (isLoginPage(url)) {
-                    if (pendingSms) {
-                        if (!pollRunning) startOfficialSmsFlow();
-                    } else if (pendingLogin) { pendingLogin = false; submitLogin(); }
-                    else showLoginScreen();
-                }
+                if (!isEntryUrl(url)) return;
+                scheduleProbe(probeGeneration, 100);
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request == null || !request.isForMainFrame()) return;
-                String u = request.getUrl() != null ? request.getUrl().toString() : "";
-                // 只处理余量查询 H5 的失败，登录页/跳转中间页的错误交给正常流程处理
-                if (!isFlowPage(u)) return;
-                int code = error != null ? error.getErrorCode() : 0;
-                if (flowLoadFailCount < 2) {
-                    flowLoadFailCount++;
-                    web.loadUrl(FLOW_URL);   // 自动重试
-                    return;
-                }
-                disarmLoadTimeout();
-                hideLoading();
-                showNative();
-                if (statusLine != null) statusLine.setText("网络加载失败(" + code + ")，请检查网络后点「刷新」重试");
+                if (request == null || !request.isForMainFrame() || !isEntryUrl(request.getUrl().toString())) return;
+                int code = error == null ? 0 : error.getErrorCode();
+                finishProbeFailure("流量页面加载失败(" + code + ")，请检查网络后重试");
             }
 
             @Override
-            public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
-                if (request == null || !request.isForMainFrame()) return;
-                String u = request.getUrl() != null ? request.getUrl().toString() : "";
-                if (!isFlowPage(u)) return;
-                int code = errorResponse != null ? errorResponse.getStatusCode() : 0;
-                if (flowLoadFailCount < 2) {
-                    flowLoadFailCount++;
-                    web.loadUrl(FLOW_URL);
-                    return;
-                }
-                disarmLoadTimeout();
-                hideLoading();
-                showNative();
-                if (statusLine != null) statusLine.setText("页面加载失败(" + code + ")，请点「刷新」重试");
+            public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                if (request == null || !request.isForMainFrame() || !isEntryUrl(request.getUrl().toString())) return;
+                int code = response == null ? 0 : response.getStatusCode();
+                finishProbeFailure("流量页面返回错误(" + code + ")，请稍后重试");
             }
 
             @Override
             public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
                 handler.cancel();
-                disarmLoadTimeout();
-                hideLoading();
-                showNative();
-                if (statusLine != null) statusLine.setText("安全连接失败，请检查系统时间与网络后重试");
+                if (error != null && isEntryUrl(error.getUrl()))
+                    finishProbeFailure("安全连接失败，请检查系统时间与网络后重试");
             }
         });
-        web.setWebChromeClient(new WebChromeClient() {
-            @Override
-            public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
-                handleJsAlert(message);
-                result.confirm();
-                return true;
-            }
-        });
+        web.setWebChromeClient(new WebChromeClient());
         container.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
-    private boolean isWapHome(String url) {
-        return url != null && (url.startsWith("http://wap.10086.cn/bj/")
-                || url.startsWith("https://wap.10086.cn/bj/"));
+    private boolean isEntryUrl(String value) {
+        if (value == null) return false;
+        try {
+            Uri uri = Uri.parse(value);
+            return "https".equalsIgnoreCase(uri.getScheme())
+                    && "wx.10086.cn".equalsIgnoreCase(uri.getHost())
+                    && "/cmcc-service/app-pages/main/marginQuery".equals(uri.getPath())
+                    && (uri.getQuery() == null || uri.getQuery().isEmpty());
+        } catch (Exception ignored) { return false; }
     }
 
-    private boolean isPage(String url, String hostPath) {
-        if (url == null) return false;
-        return url.startsWith("http://" + hostPath) || url.startsWith("https://" + hostPath);
+    private void loadEntry(String message, boolean showProgress) {
+        stopProbe();
+        probeGeneration++;
+        pendingSms = false;
+        pendingLogin = false;
+        smsCommanded = false;
+        loginCommanded = false;
+        latestSmsSeconds = 0;
+        partialProbeCount = 0;
+        partialRendered = false;
+        if (countdownRunnable != null) uiHandler.removeCallbacks(countdownRunnable);
+        countdownLeft = 0;
+        smsCountdownActive = false;
+        probeDeadline = System.currentTimeMillis() + 60000L;
+        if (showProgress) showLoading(message);
+        else hideLoading();
+        if (web != null) web.loadUrl(MarginPageBridge.ENTRY_URL);
     }
 
-    private boolean isFlowPage(String url) {
-        return url != null && url.startsWith(
-                "https://wx.10086.cn/cmcc-service/app-pages/main/marginQuery");
+    private void startProbeWindow() {
+        probeDeadline = System.currentTimeMillis() + 60000L;
+        scheduleProbe(probeGeneration, 0);
     }
 
-    private boolean isLoginPage(String url) {
-        if (url == null) return false;
-        return url.startsWith("https://login.10086.cn/html/login/")
-                || url.startsWith("http://login.10086.cn/html/login/");
+    private void scheduleProbe(final int generation, long delayMs) {
+        if (generation != probeGeneration || web == null) return;
+        if (probeRunnable != null) uiHandler.removeCallbacks(probeRunnable);
+        probeRunnable = new Runnable() {
+            @Override public void run() { runProbe(generation); }
+        };
+        uiHandler.postDelayed(probeRunnable, delayMs);
     }
 
-    private boolean onLoginPageNow() {
-        return isLoginPage(lastUrl);
+    private void stopProbe() {
+        if (probeRunnable != null) uiHandler.removeCallbacks(probeRunnable);
+        probeRunnable = null;
+        probeGeneration++;
+    }
+
+    private void runProbe(final int generation) {
+        if (generation != probeGeneration || web == null) return;
+        if (System.currentTimeMillis() >= probeDeadline) {
+            if (!pendingSms && !pendingLogin && smsCommanded) {
+                stopProbe();
+                latestSmsSeconds = countdownLeft = 0;
+                smsCountdownActive = false;
+                if (countdownRunnable != null) uiHandler.removeCallbacks(countdownRunnable);
+                resetLoginBtns();
+                showLoginScreen();
+                loginError("官网60秒提交窗口已结束，请重新获取验证码");
+                return;
+            }
+            finishProbeFailure("等待页面或登录操作超时，请重试");
+            return;
+        }
+        web.evaluateJavascript(MarginPageBridge.PROBE_JS, new android.webkit.ValueCallback<String>() {
+            @Override public void onReceiveValue(String raw) {
+                if (generation != probeGeneration || web == null) return;
+                try {
+                    JSONObject result = new JSONObject(decodeEvalString(raw));
+                    handleProbeResult(result, generation);
+                } catch (Exception e) {
+                    scheduleProbe(generation, 1200);
+                }
+            }
+        });
+    }
+
+    private void handleProbeResult(JSONObject result, int generation) {
+        String state = result.optString("state", "loading");
+        boolean authenticated = result.optBoolean("authenticated", false);
+        int smsSeconds = Math.max(0, result.optInt("smsSeconds", 0));
+        boolean smsSending = result.optBoolean("smsSending", false);
+        String pageError = result.optString("error", "").trim();
+        latestSmsSeconds = smsSeconds;
+        if (smsSeconds > 0) syncSmsCountdown(smsSeconds);
+        if (pendingSms && smsSeconds > 0) {
+            probeDeadline = System.currentTimeMillis() + 60000L;
+            pendingSms = false;
+            loginError("验证码已发送，请在倒计时结束前输入并登录");
+            showLoginScreen();
+        }
+
+        if ("ready".equals(state)) {
+            JSONArray items = result.optJSONArray("items");
+            if (items == null || items.length() == 0) {
+                finishProbeFailure("已登录，但页面没有返回可显示的流量项目");
+                return;
+            }
+            pendingSms = pendingLogin = false;
+            if (result.optBoolean("partial", false) && partialProbeCount < 4) {
+                partialProbeCount++;
+                if (!partialRendered) {
+                    renderResult(items);
+                    partialRendered = true;
+                }
+                if (statusLine != null) statusLine.setText("流量数据已加载，附加项目仍在读取…");
+                scheduleProbe(generation, 1500);
+            } else {
+                stopProbe();
+                renderResult(items);
+                if (result.optBoolean("partial", false) && statusLine != null)
+                    statusLine.setText("已显示当前可用流量，部分附加项目仍未加载");
+            }
+            return;
+        }
+        if ("empty".equals(state)) {
+            finishProbeFailure(pageError.isEmpty() ? "当前没有可显示的流量数据" : pageError);
+            return;
+        }
+        if ("error".equals(state)) {
+            finishProbeFailure(pageError.isEmpty() ? "流量页面暂时无法读取，请稍后重试" : pageError);
+            return;
+        }
+        if (authenticated || "loading".equals(state)) {
+            if (authenticated) showLoading("登录成功，正在加载流量数据…");
+            else if (pendingLogin) showLoading("正在验证短信随机码…");
+            else showLoading("正在加载流量数据…");
+            scheduleProbe(generation, 1200);
+            return;
+        }
+        if ("login".equals(state)) {
+            if (((pendingSms && smsCommanded) || pendingLogin) && !smsSending
+                    && !pageError.isEmpty() && !pageError.contains("成功") && !pageError.contains("已发送")) {
+                finishProbeFailure(pageError);
+                return;
+            }
+            if (pendingSms && !smsCommanded) {
+                smsCommanded = true;
+                getSmsBtn.setEnabled(false);
+                loginError("正在向页面提交短信验证码请求…");
+                runBridgeCommand(MarginPageBridge.requestSms(phoneInput.getText().toString().trim()), true);
+                scheduleProbe(generation, 1200);
+                return;
+            }
+            if (pendingLogin) {
+                showLoading("正在验证短信随机码…");
+                scheduleProbe(generation, 1200);
+                return;
+            }
+            showLoginScreen();
+            if (pendingSms && smsSending) loginError("正在发送短信验证码，请稍候…");
+            if (pendingSms || smsCountdownActive || smsSending) scheduleProbe(generation, 1200);
+            else stopProbe();
+            return;
+        }
+        scheduleProbe(generation, 1200);
+    }
+
+    private void runBridgeCommand(String expression, final boolean smsRequest) {
+        if (web == null) return;
+        final int commandGeneration = probeGeneration;
+        web.evaluateJavascript(expression, new android.webkit.ValueCallback<String>() {
+            @Override public void onReceiveValue(String raw) {
+                if (web == null || commandGeneration != probeGeneration) return;
+                try {
+                    JSONObject reply = new JSONObject(decodeEvalString(raw));
+                    if (!reply.optBoolean("ok", false)) {
+                        String msg = reply.optString("error", "请求未成功，请检查页面后重试");
+                        if (smsRequest) {
+                            pendingSms = false;
+                            smsCommanded = false;
+                            stopProbe();
+                            resetLoginBtns();
+                            showLoginScreen();
+                            loginError(msg);
+                        } else {
+                            pendingLogin = false;
+                            loginCommanded = false;
+                            stopProbe();
+                            resetLoginBtns();
+                            showLoginScreen();
+                            loginError(msg);
+                        }
+                    }
+                } catch (Exception e) {
+                    // Keep probing for the state transition; the command is never repeated automatically.
+                }
+            }
+        });
+    }
+
+    private String decodeEvalString(String raw) throws Exception {
+        if (raw == null || "null".equals(raw)) return "";
+        JSONArray wrapper = new JSONArray("[" + raw + "]");
+        Object value = wrapper.get(0);
+        return value instanceof String ? (String) value : String.valueOf(value);
+    }
+
+    private void finishProbeFailure(String message) {
+        boolean authOperation = pendingSms || pendingLogin;
+        stopProbe();
+        pendingSms = pendingLogin = false;
+        smsCommanded = loginCommanded = false;
+        resetLoginBtns();
+        hideLoading();
+        if (authOperation) {
+            showLoginScreen();
+            loginError(message);
+            return;
+        }
+        showNative();
+        if (statusLine != null) {
+            statusLine.setText(lastItems != null && !lastItems.isEmpty()
+                    ? message + "；当前显示的是上次成功数据" : message);
+        }
     }
 
     private void showLoginScreen() {
-        disarmLoadTimeout();
         hideLoading();
         if (web != null) web.setVisibility(View.INVISIBLE);
         if (nativeScreen != null) nativeScreen.setVisibility(View.GONE);
@@ -379,14 +491,6 @@ public class MainActivity extends Activity {
         if (web != null) web.setVisibility(View.INVISIBLE);
         if (loginScreen != null) loginScreen.setVisibility(View.GONE);
         if (nativeScreen != null) nativeScreen.setVisibility(View.VISIBLE);
-    }
-
-    /** 风控（滑块/登录保护）兜底：短暂显示官方页面让用户完成验证 */
-    private void showWebOnly() {
-        hideLoading();
-        if (loginScreen != null) loginScreen.setVisibility(View.GONE);
-        if (nativeScreen != null) nativeScreen.setVisibility(View.GONE);
-        if (web != null) web.setVisibility(View.VISIBLE);
     }
 
     /* 过渡加载层：登录成功取数 / 启动取数期间给用户进度反馈 */
@@ -426,25 +530,6 @@ public class MainActivity extends Activity {
         if (loadingOverlay != null) loadingOverlay.setVisibility(View.GONE);
     }
 
-    /* 启动/刷新取数时挂一个 20 秒看门狗，加载成功或失败都会解除 */
-    private void armLoadTimeout() {
-        uiHandler.removeCallbacks(loadTimeoutRunnable);
-        uiHandler.postDelayed(loadTimeoutRunnable, 20000);
-    }
-
-    private void disarmLoadTimeout() {
-        uiHandler.removeCallbacks(loadTimeoutRunnable);
-    }
-
-    private boolean hasSavedCookie() {
-        try {
-            String c = getSharedPreferences(PREFS, MODE_PRIVATE).getString("cookies", "");
-            return c != null && !c.isEmpty();
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     /* ================= 原生登录界面（仿官方元素） ================= */
 
     private void buildLoginScreen() {
@@ -470,7 +555,7 @@ public class MainActivity extends Activity {
         t1.setTextColor(0xFFFFFFFF);
         header.addView(t1);
         TextView t2 = new TextView(this);
-        t2.setText("登录中国移动账号，自动同步流量余量");
+        t2.setText("通过短信验证码登录，同步流量余量");
         t2.setTextSize(12);
         t2.setTextColor(0xCCFFFFFF);
         t2.setPadding(0, dp(4), 0, 0);
@@ -592,6 +677,41 @@ public class MainActivity extends Activity {
         }
     }
 
+
+    /* ================= 原生短信登录，通过 MarginPageBridge 与页面 DOM 交互 ================= */
+
+    private void doGetSms() {
+        String phone = phoneInput.getText().toString().trim();
+        if (phone.length() != 11) { loginError("请输入正确的11位手机号码"); return; }
+        loginError("");
+        if (remember[0]) getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("remember_phone", phone).apply();
+        pendingSms = true;
+        pendingLogin = false;
+        smsCommanded = false;
+        loginCommanded = false;
+        getSmsBtn.setEnabled(false);
+        startProbeWindow();
+    }
+
+    private void doLogin() {
+        String phone = phoneInput.getText().toString().trim();
+        String code = smsInput.getText().toString().trim();
+        if (phone.length() != 11) { loginError("请输入正确的11位手机号码"); return; }
+        if (!code.matches("\\d{6}")) { loginError("请输入6位短信随机码"); return; }
+        if (latestSmsSeconds <= 0) { loginError("请先获取短信验证码，并在有效时间内登录"); return; }
+        if (loginCommanded) return;
+        loginError("");
+        if (remember[0]) getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("remember_phone", phone).apply();
+        pendingSms = false;
+        pendingLogin = true;
+        loginCommanded = true;
+        loginBtn.setEnabled(false);
+        loginBtn.setText("登录中…");
+        showLoading("正在验证短信随机码…");
+        startProbeWindow();
+        runBridgeCommand(MarginPageBridge.submitLogin(phone, code), false);
+    }
+
     private void resetLoginBtns() {
         if (loginBtn != null) { loginBtn.setEnabled(true); loginBtn.setText("立即登录"); }
         if (countdownLeft <= 0 && getSmsBtn != null) {
@@ -600,282 +720,32 @@ public class MainActivity extends Activity {
         }
     }
 
-    /* ================= 通过隐藏 WebView 自动执行官方登录 ================= */
-
-    private static final String GETSMS_JS =
-            "(function(){var n=document.getElementById('sms_nav');if(n&&n.className.indexOf('on')<0)n.click();" +
-            "var p=document.getElementById('p_phone');if(p){p.value='%1$s';p.dispatchEvent(new Event('input',{bubbles:true}));p.dispatchEvent(new Event('change',{bubbles:true}));}" +
-            "var el=document.getElementById('getSMSpwd');if(el){el.click();return 'ok';}return 'no';})()";
-    private static final String PWD_GETSMS_JS =
-            "(function(){var n=document.getElementById('account_nav');if(n&&n.className.indexOf('on')<0)n.click();" +
-            "var p=document.getElementById('p_phone_account');if(p)p.value='%1$s';" +
-            "var el=document.getElementById('getPhoneSMSpwd');if(el){el.click();return 'ok';}return 'no';})()";
-    private static final String LOGIN_JS =
-            "(function(){var n=document.getElementById('sms_nav');if(n&&n.className.indexOf('on')<0)n.click();" +
-            "var p=document.getElementById('p_phone');if(p)p.value='%1$s';" +
-            "var c=document.getElementById('p_sms');if(c)c.value='%2$s';" +
-            "var f=document.getElementById('fw');if(f&&f.className.indexOf('check_chk')<0)f.click();" +
-            "var x=document.getElementById('xx');if(x&&x.className.indexOf('check_chk')<0)x.click();" +
-            "var k=document.getElementById('chk');if(k&&k.className.indexOf('check_chk')<0)k.click();" +
-            "var bt=document.getElementById('submit_bt');if(bt){bt.click();return 'ok';}return 'no';})()";
-    private static final String PWD_LOGIN_JS =
-            "(function(){var n=document.getElementById('account_nav');if(n&&n.className.indexOf('on')<0)n.click();" +
-            "var p=document.getElementById('p_phone_account');if(p)p.value='%1$s';" +
-            "var w=document.getElementById('p_pwd');if(w)w.value='%2$s';" +
-            "var s=document.getElementById('phone_sms');if(s)s.value='%3$s';" +
-            "var f=document.getElementById('fw');if(f&&f.className.indexOf('check_chk')<0)f.click();" +
-            "var x=document.getElementById('xx');if(x&&x.className.indexOf('check_chk')<0)x.click();" +
-            "var k=document.getElementById('chk');if(k&&k.className.indexOf('check_chk')<0)k.click();" +
-            "var bt=document.getElementById('submit_bt');if(bt){bt.click();return 'ok';}return 'no';})()";
-    private static final String POLL_JS =
-            "(function(){var o={};" +
-            "var cap=document.getElementById('captcha-box');var cs=cap?window.getComputedStyle(cap):null;o.captcha=!!(cs&&cs.display&&cs.display!=='none');" +
-            "var pr=document.getElementById('login_protect_id');var ps=pr?window.getComputedStyle(pr):null;o.protect=!!(ps&&ps.display&&ps.display!=='none');" +
-            "var e=document.getElementById('errinfo');o.err=e?e.textContent.replace(/^\\s+|\\s+$/g,''):'';" +
-            "var ss=document.getElementById('sendSms');var s2=ss?window.getComputedStyle(ss):null;o.sent=!!(s2&&s2.display&&s2.display!=='none');" +
-            "return JSON.stringify(o);})()";
-    private static final String CLOSE_SEND_JS =
-            "(function(){var b=document.getElementById('sendMsgQR');if(b)b.click();})()";
-
-    private void doGetSms() {
-        String phone = phoneInput.getText().toString().trim();
-        if (phone.length() != 11) { loginError("请输入正确的11位手机号码"); return; }
-        loginError("");
-        stopPoll();
-        pendingSms = true;
-        pendingLogin = false;
+    private void syncSmsCountdown(int seconds) {
+        if (seconds <= 0) return;
+        latestSmsSeconds = seconds;
+        if (!smsCountdownActive) {
+            startCountdown(seconds);
+            return;
+        }
+        if (seconds < countdownLeft) countdownLeft = seconds;
         getSmsBtn.setEnabled(false);
-        // 强制全新会话：清空 cookie + localStorage，避免沿用被风控标记的旧会话
-        resetLoginSession();
-        uiHandler.postDelayed(new Runnable() {
-            @Override public void run() {
-                if (pendingSms) web.loadUrl(LOGIN_URL);
-            }
-        }, 250);
+        getSmsBtn.setText("重新获取(" + countdownLeft + "s)");
     }
 
-    /** 清空 WebView 全部 cookie 与本地存储，让登录/滑块/发短信都走全新会话 */
-    private void resetLoginSession() {
-        try {
-            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
-            if (android.os.Build.VERSION.SDK_INT >= 21) cm.removeAllCookies(null);
-            else cm.removeAllCookie();
-            if (web != null) {
-                web.evaluateJavascript("try{localStorage.clear();sessionStorage.clear();}catch(e){}", null);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    private void submitGetSms() {
-        String phone = phoneInput.getText().toString().trim();
-        String js = smsMode ? String.format(GETSMS_JS, phone) : String.format(PWD_GETSMS_JS, phone);
-        eval(js);
-    }
-
-    /** 官方页面负责加载并校验验证码；不复制其内部 /genCaptcha 与 /check 协议。 */
-    private void startOfficialSmsFlow() {
-        showWebOnly();
-        startPoll();
-        submitGetSms();
-        Toast.makeText(MainActivity.this,
-                "请在中国移动官方页面完成滑块验证；如未自动触发，请点页面上的“获取短信随机码”",
-                Toast.LENGTH_LONG).show();
-    }
-
-    private void doLogin() {
-        String phone = phoneInput.getText().toString().trim();
-        if (phone.length() != 11) { loginError("请输入正确的11位手机号码"); return; }
-        if (smsInput.getText().toString().trim().isEmpty()) { loginError("请输入短信随机码"); return; }
-        loginError("");
-        if (remember[0]) {
-            getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().putString("remember_phone", phone).apply();
-        }
-        pendingLogin = true;
-        pendingSms = false;
-        loginBtn.setEnabled(false);
-        loginBtn.setText("登录中…");
-        showLoading("正在登录，请稍候…");
-        armLoadTimeout();
-        if (onLoginPageNow()) submitLogin();
-        else web.loadUrl(LOGIN_URL);
-        startPoll();
-        startLoginWatchdog();
-    }
-
-    /* 登录看门狗：官方跳转链卡住时强制直达流量页，避免一直停在"正在登录" */
-    private void startLoginWatchdog() {
-        loginWatchdogTicks = 0;
-        uiHandler.removeCallbacks(loginWatchdog);
-        if (loginWatchdog == null) {
-            loginWatchdog = new Runnable() {
-                @Override public void run() {
-                    if (!pendingLogin) return;
-                    if (++loginWatchdogTicks >= 8) {   // 约 7.2 秒
-                        pendingLogin = false;
-                        web.loadUrl(FLOW_URL);
-                        return;
-                    }
-                    uiHandler.postDelayed(this, 900);
-                }
-            };
-        }
-        uiHandler.postDelayed(loginWatchdog, 900);
-    }
-
-    private void submitLogin() {
-        String phone = phoneInput.getText().toString().trim();
-        String js = String.format(LOGIN_JS, phone, smsInput.getText().toString().trim());
-        eval(js);
-    }
-
-    private void eval(String js) {
-        if (web != null) web.evaluateJavascript(js, null);
-    }
-
-    private void startPoll() {
-        pollRunning = true;
-        pollTicks = 0;
-        if (pollRunnable == null) {
-            pollRunnable = new Runnable() {
-                @Override public void run() {
-                    if (!pollRunning) return;
-                    if (++pollTicks > 180) {
-                        stopPoll();
-                        resetLoginBtns();
-                        pendingSms = false;
-                        pendingLogin = false;
-                        showLoginScreen();
-                        loginError("操作超时，请重试");
-                        return;
-                    }
-                    if (web != null) {
-                        web.evaluateJavascript(POLL_JS, new android.webkit.ValueCallback<String>() {
-                            @Override public void onReceiveValue(String value) {
-                                if (!pollRunning) return;
-                                try {
-                                    JSONObject o = new JSONObject(jsString(value));
-                                    boolean captcha = o.optBoolean("captcha");
-                                    boolean protect = o.optBoolean("protect");
-                                    String err = o.optString("err");
-                                    boolean sent = o.optBoolean("sent");
-
-                                    if (captcha || protect) {
-                                        // 官方挑战始终留在可交互的官方 WebView 中，不自动重放请求。
-                                        if (loginScreen != null && loginScreen.getVisibility() == View.VISIBLE) {
-                                            showWebOnly();
-                                            Toast.makeText(MainActivity.this,
-                                                    captcha ? "请在官方页面完成滑动验证" : "请在官方页面完成登录保护验证",
-                                                    Toast.LENGTH_SHORT).show();
-                                        }
-                                    } else {
-                                        if (!pendingSms && web != null && web.getVisibility() == View.VISIBLE) {
-                                            showLoginScreen();
-                                        }
-                                        if (!err.isEmpty()) {
-                                            stopPoll();
-                                            resetLoginBtns();
-                                            pendingSms = false;
-                                            pendingLogin = false;
-                                            showLoginScreen();
-                                            loginError(err);
-                                            return;
-                                        }
-                                        if (pendingSms && sent) {
-                                            stopPoll();
-                                            resetLoginBtns();
-                                            pendingSms = false;
-                                            eval(CLOSE_SEND_JS);
-                                            showLoginScreen();
-                                            Toast.makeText(MainActivity.this,
-                                                    "验证码已发送，请注意查收", Toast.LENGTH_SHORT).show();
-                                            startCountdown();
-                                            return;
-                                        }
-                                    }
-                                } catch (Exception ignored) {}
-                                uiHandler.postDelayed(pollRunnable, 900);
-                            }
-                        });
-                    }
-                }
-            };
-        }
-        uiHandler.postDelayed(pollRunnable, 900);
-    }
-
-    private void stopPoll() {
-        pollRunning = false;
-        if (pollRunnable != null) uiHandler.removeCallbacks(pollRunnable);
-        if (loginWatchdog != null) uiHandler.removeCallbacks(loginWatchdog);
-    }
-
-    /**
-     * 官方登录页用 alert() 提示发短信/登录结果（滑块验证成功后自动 sendsms -> sendDynamicPasswd，
-     * 成功/失败都走 alert）。WebView 默认吞掉 alert，导致"滑完滑块 App 感知不到验证码已发送"。
-     * 这里拦截并映射到原生登录状态机。
-     */
-    private void handleJsAlert(String msg) {
-        if (msg == null || msg.isEmpty()) return;
-        final String m = msg;
-        uiHandler.post(new Runnable() {
-            @Override public void run() {
-                if (m.contains("已将短信随机码发送至手机")) {
-                    if (pendingSms || pendingLogin) {
-                        stopPoll();
-                        resetLoginBtns();
-                        pendingSms = false;
-                        pendingLogin = false;
-                        eval(CLOSE_SEND_JS);
-                        showLoginScreen();
-                        Toast.makeText(MainActivity.this,
-                                "验证码已发送，请注意查收", Toast.LENGTH_SHORT).show();
-                        startCountdown();
-                    }
-                } else if (pendingSms || pendingLogin) {
-                    stopPoll();
-                    resetLoginBtns();
-                    pendingSms = false;
-                    pendingLogin = false;
-                    eval(CLOSE_SEND_JS);
-                    showLoginScreen();
-                    if (m.contains("一分钟以后再试") || m.contains("暂时不能发送")
-                            || m.contains("发送次数过于频繁") || m.contains("发送失败")
-                            || m.contains("连接超时")) {
-                        // 运营商限频/临时失败：与官方一致禁用 60 秒再试
-                        loginError("发送太频繁，请 60 秒后再试");
-                        startCountdown();
-                    } else {
-                        loginError(m);
-                    }
-                }
-            }
-        });
-    }
-
-    private void eval(String js, android.webkit.ValueCallback<String> cb) {
-        if (web != null) web.evaluateJavascript(js, cb);
-    }
-
-    private String jsString(String v) {
-        if (v == null) return "";
-        String s = v;
-        if (s.startsWith("\"") && s.endsWith("\"")) {
-            s = s.substring(1, s.length() - 1).replace("\\\"", "\"").replace("\\\\", "\\");
-        }
-        return s;
-    }
-
-    private void startCountdown() {
-        countdownLeft = 60;
+    private void startCountdown(int seconds) {
+        countdownLeft = seconds;
+        smsCountdownActive = true;
         getSmsBtn.setEnabled(false);
-        getSmsBtn.setText("重新获取(60s)");
+        getSmsBtn.setText("重新获取(" + seconds + "s)");
+        if (countdownRunnable != null) uiHandler.removeCallbacks(countdownRunnable);
         if (countdownRunnable == null) {
             countdownRunnable = new Runnable() {
                 @Override public void run() {
                     if (countdownLeft <= 0) {
                         getSmsBtn.setEnabled(true);
                         getSmsBtn.setText("获取验证码");
+                        smsCountdownActive = false;
+                        latestSmsSeconds = 0;
                         return;
                     }
                     getSmsBtn.setText("重新获取(" + countdownLeft + "s)");
@@ -885,6 +755,37 @@ public class MainActivity extends Activity {
             };
         }
         uiHandler.postDelayed(countdownRunnable, 1000);
+    }
+
+    private void clearWebSessionAndReload() {
+        stopProbe();
+        pendingSms = pendingLogin = false;
+        smsCommanded = loginCommanded = false;
+        lastItems.clear();
+        if (summaryBox != null) summaryBox.removeAllViews();
+        if (headerRemainNum != null) headerRemainNum.setText("--");
+        if (headerUsedTotal != null) headerUsedTotal.setText("--");
+        if (headerBar != null) headerBar.setRatio(0f);
+        resetLoginBtns();
+        if (countdownRunnable != null) uiHandler.removeCallbacks(countdownRunnable);
+        countdownLeft = 0;
+        smsCountdownActive = false;
+        latestSmsSeconds = 0;
+        final int clearGeneration = ++probeGeneration;
+        if (web != null) {
+            web.stopLoading();
+            web.evaluateJavascript("try{localStorage.clear();sessionStorage.clear();}catch(e){}", null);
+        }
+        android.webkit.WebStorage.getInstance().deleteAllData();
+        CookieManager.getInstance().removeAllCookies(new android.webkit.ValueCallback<Boolean>() {
+            @Override public void onReceiveValue(Boolean removed) {
+                if (clearGeneration != probeGeneration || web == null) return;
+                CookieManager.getInstance().flush();
+                loadEntry("正在重新打开流量查询…", false);
+                showLoginScreen();
+            }
+        });
+        showLoginScreen();
     }
 
     /* ================= 原生主界面（上半区压缩至约半屏） ================= */
@@ -943,15 +844,7 @@ public class MainActivity extends Activity {
         logoutBtn.setPadding(dp(12), 0, dp(12), 0);
         logoutBtn.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                CookieManager.getInstance().removeAllCookies(null);
-                CookieManager.getInstance().flush();
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("cookies").apply();
-                pendingSms = false;
-                pendingLogin = false;
-                stopPoll();
-                resetLoginBtns();
-                web.loadUrl(LOGIN_URL);
-                showLoginScreen();
+                clearWebSessionAndReload();
             }
         });
         LinearLayout.LayoutParams lb = new LinearLayout.LayoutParams(
@@ -1323,120 +1216,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    /* ================= 余量刷新（隐藏 WebView 后台执行） ================= */
+    /* ================= 余量刷新（始终仅访问指定流量入口） ================= */
 
     private void refreshFlow() {
         statusLine.setText("正在刷新流量余量…");
-        web.setVisibility(View.INVISIBLE);
-        nativeScreen.setVisibility(View.VISIBLE);
-        armLoadTimeout();
-        web.loadUrl(FLOW_URL);
-    }
-
-    /* ================= 数据提取 ================= */
-
-    private static final String EXTRACT_JS =
-            "(function(){try{" +
-            "var el=document.querySelector('#app'),vm=el&&el.__vue__,i=0;" +
-            "while(vm&&!vm.$store&&vm.$parent&&i++<8)vm=vm.$parent;" +
-            "var st=vm&&vm.$store&&vm.$store.state;" +
-            "var mod=st&&st.planRemainQryInfo;var q=mod&&mod.newPlanRemainQry;" +
-            "var sh=st&&st.userShareInfo||{},iq=st&&st.flowInfoQry||{};" +
-            "if(!q||mod.newPlanRemainQryLoadState!=='loadCompleted')return '[]';" +
-            "if((sh.shareUserInfoLoadState&&sh.shareUserInfoLoadState!=='loadCompleted')||(iq.flowInfoQryLoadState&&iq.flowInfoQryLoadState!=='loadCompleted'))return '[]';" +
-            "var out=[],seen={};" +
-            "function pick(o,keys){for(var j=0;j<keys.length;j++)if(o[keys[j]]!=null)return o[keys[j]];return null;}" +
-            "function amount(v,u){if(v==null||v==='')return '';if(v==='N')return '不限';if(v==='--')return '--';" +
-            "if(typeof v==='object'&&v.value!=null){u=v.unit||u;v=v.value;}" +
-            "if(typeof v==='string'&&/[\\d.]+\\s*(KB|MB|GB|TB)/i.test(v))return v.replace(/\\s+/g,'');" +
-            "var n=Number(v);if(!isFinite(n))return '';u=String(u||'').toUpperCase();" +
-            "if(u==='04'||u==='4'||u==='GB')return n+'GB';" +
-            "if(u==='03'||u==='3'||u==='1'||u==='MB')return n+'MB';" +
-            "if(u==='KB'||u==='TB')return n+u;return '';" +
-            "}" +
-            "function hasAmount(o,d){if(!o||typeof o!=='object'||d>5)return false;" +
-            "if(o.usedRes!=null||o.remainRes!=null||o.totalRes!=null||o.usageAmount!=null||o.usedFlows!=null||o.leftFlows!=null||o.allFlows!=null||o.visitFlows!=null||o.shareUsedRes!=null||o.shareRemainRes!=null||o.shareTotalRes!=null)return true;" +
-            "var ks=Object.keys(o);for(var j=0;j<ks.length;j++){var v=o[ks[j]];if(v&&typeof v==='object'){if(Array.isArray(v)){for(var k=0;k<v.length;k++)if(hasAmount(v[k],d+1))return true;}else if(hasAmount(v,d+1))return true;}}return false;}" +
-            "function add(name,cat,used,remain,total,u){var a=amount(used,u),b=amount(remain,u),c=amount(total,u);" +
-            "if(!name||(!a&&!b&&!c))return;var key=[cat,name,a,b,c].join('|');if(seen[key])return;seen[key]=1;out.push({name:String(name),cat:cat,used:a,remain:b,total:c});}" +
-            "function walk(x,cat,base,u,d){if(!x||typeof x!=='object'||d>9)return;" +
-            "if(Array.isArray(x)){for(var z=0;z<x.length;z++)walk(x[z],cat,base,u,d+1);return;}" +
-            "var name=pick(x,['planName','flowName','outPlanTitle','standardProductName','productName','packageName','resourcesName','name'])||base||'';" +
-            "var unit=x.unit||x.flowUnit||x.resourcesUnit||u||'';" +
-            "var used=pick(x,['usedRes','shareUsedRes','usedFlows','visitFlows','usageAmount']);" +
-            "var remain=pick(x,['remainRes','shareRemainRes','leftFlows']);" +
-            "var total=pick(x,['totalRes','shareTotalRes','allFlows']);" +
-            "var child=false;var ks=Object.keys(x);for(var j=0;j<ks.length;j++){var v=x[ks[j]];if(v&&typeof v==='object'&&hasAmount(v,0)){child=true;break;}}" +
-            "if(!child)add(name,cat,used,remain,total,unit);" +
-            "for(var j=0;j<ks.length;j++){var v=x[ks[j]];if(v&&typeof v==='object')walk(v,cat,name,unit,d+1);}" +
-            "}" +
-            "var roots=q.planRemianFlowListRes||[];if(!Array.isArray(roots))roots=[roots];" +
-            "for(var r=0;r<roots.length;r++){var p=roots[r]||{},gs=p.planRemianFlowRes||[];" +
-            "for(var g=0;g<gs.length;g++){var f=gs[g],t=String(f.flowtype||'');" +
-            "var cat=t==='0'?'国内通用流量':t==='1'?'国内定向流量':t==='2'?'国内其他流量':t==='3'?'WLAN流量':'流量';" +
-            "walk(f.planRemianFlowInfoRes||[],cat,'','',0);}" +
-            "walk(p.outPlanInfoRes||[],'套餐外流量','套餐外流量','03',0);" +
-            "walk(p.planRemianOtherListRes||[],'其他流量','其他流量','',0);}" +
-            "walk(q.planRemianOtherListRes||[],'其他流量','其他流量','',0);" +
-            "var so=sh.shareFlowOverallData||{},shareStart=out.length;" +
-            "function share(o,n){if(!o)return;var a=o.overallUsedData,b=o.overallRemainData,c=o.overallTotalData;" +
-            "add(n,'共享流量',a&&a.value,b&&b.value,c&&c.value,(a&&a.unit)||(b&&b.unit)||'04');}" +
-            "walk(sh.shareFlowDetailData||[],'共享流量','共享流量','04',0);" +
-            "if(out.length===shareStart){share(so.mainShareFlowOverallData,'主卡共享流量');share(so.subShareFlowOverallData,'副卡共享流量');}" +
-            "walk(iq.nationalFlowPacketUsageInfoList||[],'国际流量','国际流量','03',0);" +
-            "walk(iq.nationalStandardTariffUsageInfoList||[],'国际流量','境外漫游用量','03',0);" +
-            "Object.keys(st).forEach(function(k){if(/day.*flow|flow.*day/i.test(k))walk(st[k],'每日流量','每日流量','03',0);});" +
-            "return JSON.stringify(out);" +
-            "}catch(e){return '[]';}})()";
-
-    private void scheduleExtract() {
-        uiHandler.postDelayed(new Runnable() {
-            @Override public void run() { extractData(); }
-        }, 1200);
-    }
-
-    private void extractData() {
-        if (web == null) return;
-        web.evaluateJavascript(EXTRACT_JS, new android.webkit.ValueCallback<String>() {
-            @Override public void onReceiveValue(String value) {
-                try {
-                    String json = (value == null) ? "[]" : value;
-                    if (json.startsWith("\"") && json.endsWith("\"")) {
-                        json = json.substring(1, json.length() - 1)
-                                .replace("\\\"", "\"").replace("\\\\", "\\");
-                    }
-                    JSONArray arr = new JSONArray(json);
-                    if (arr.length() > 0) {
-                        renderResult(arr);
-                    } else if (extractTries < 12) {
-                        extractTries++;
-                        uiHandler.postDelayed(new Runnable() {
-                            @Override public void run() { extractData(); }
-                        }, 1500);
-                    } else if (autoReloads < 2) {
-                        autoReloads++;
-                        web.loadUrl(FLOW_URL);
-                    } else {
-                        disarmLoadTimeout();
-                        hideLoading();
-                        showNative();
-                        statusLine.setText("未获取到数据，请点「刷新」重试");
-                    }
-                } catch (Exception e) {
-                    if (extractTries < 12) {
-                        extractTries++;
-                        uiHandler.postDelayed(new Runnable() {
-                            @Override public void run() { extractData(); }
-                        }, 1500);
-                    } else {
-                        disarmLoadTimeout();
-                        hideLoading();
-                        showNative();
-                        statusLine.setText("解析失败，请点「刷新」重试");
-                    }
-                }
-            }
-        });
+        showNative();
+        loadEntry("正在刷新流量数据…", true);
     }
 
     /* ================= 汇总与展示 ================= */
@@ -1486,7 +1271,6 @@ public class MainActivity extends Activity {
             g.items.add(it);
         }
 
-        disarmLoadTimeout();
         hideLoading();
         showNative();
         summaryBox.removeAllViews();
@@ -1510,7 +1294,7 @@ public class MainActivity extends Activity {
 
         // 总合计卡（全宽，压缩）
         summaryBox.addView(makeWideCard("基础套餐合计", "合", PRIMARY,
-                "已消耗 " + fmt(allUsed) + " · 另列共享、国际、日用等流量信息",
+                "已消耗 " + fmt(allUsed) + " · 按国内套餐汇总 · 共享信息另列",
                 allTotal, allRemain, PRIMARY));
 
         // 两列小卡
@@ -2115,67 +1899,11 @@ public class MainActivity extends Activity {
         }
     }
 
-    /* ================= 登录态 Cookie 备份/恢复 ================= */
-
     private static final String PREFS = "flow_cookies";
-    private static final String[] COOKIE_HOSTS = {
-            "https://touch.10086.cn", "https://wx.10086.cn", "https://login.10086.cn",
-            "https://wap.10086.cn", "http://wap.10086.cn", "https://www.10086.cn",
-            "https://shop.10086.cn", "https://app.online-cmcc.cn", "https://app.10086.cn",
-            "https://h.app.coc.10086.cn"
-    };
-
-    /** 把当前登录 Cookie 备份到 SharedPreferences，防 WebView 数据被系统清理 */
-    private void saveCookies() {
-        try {
-            CookieManager cm = CookieManager.getInstance();
-            LinkedHashMap<String, String> pairs = new LinkedHashMap<>();
-            for (String host : COOKIE_HOSTS) {
-                String all = cm.getCookie(host);
-                if (all == null || all.isEmpty()) continue;
-                for (String pair : all.split(";")) {
-                    String p = pair.trim();
-                    int eq = p.indexOf('=');
-                    if (eq > 0) pairs.put(p.substring(0, eq).trim(), p.substring(eq + 1).trim());
-                }
-            }
-            if (pairs.isEmpty()) return;
-            StringBuilder all = new StringBuilder();
-            for (Map.Entry<String, String> entry : pairs.entrySet()) {
-                if (all.length() > 0) all.append("; ");
-                all.append(entry.getKey()).append('=').append(entry.getValue());
-            }
-            getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().putString("cookies", all.toString()).apply();
-        } catch (Exception ignored) {}
-    }
-
-    /** 启动时用备份恢复登录态 */
-    private void restoreCookies() {
-        try {
-            String all = getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .getString("cookies", "");
-            if (all.isEmpty()) return;
-            CookieManager cm = CookieManager.getInstance();
-            cm.setAcceptCookie(true);
-            String[] pairs = all.split(";");
-            for (String p : pairs) {
-                p = p.trim();
-                if (p.isEmpty()) continue;
-                for (String h : COOKIE_HOSTS) {
-                    try { cm.setCookie(h, p); } catch (Exception ignored) {}
-                }
-            }
-            cm.flush();
-        } catch (Exception ignored) {}
-    }
 
     @Override
     protected void onPause() {
-        try {
-            saveCookies();
-            CookieManager.getInstance().flush();
-        } catch (Exception ignored) {}
+        try { CookieManager.getInstance().flush(); } catch (Exception ignored) {}
         super.onPause();
     }
 
@@ -2186,7 +1914,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         stopConsume();
-        stopPoll();
+        stopProbe();
+        uiHandler.removeCallbacksAndMessages(null);
         if (web != null) {
             web.stopLoading();
             web.destroy();
