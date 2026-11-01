@@ -1,10 +1,10 @@
 <div align="center">
   <img src="assets/banner.png" alt="流量助手 · Flow Assistant" width="100%">
   <br><br>
-  <a href="https://github.com/fuoins/flow-assistant/releases/latest"><img src="https://img.shields.io/badge/下载-APK%20v1.8-0B6BFF?style=flat-square&logo=android&logoColor=white" alt="Download APK"></a>
+  <a href="https://github.com/fuoins/flow-assistant/releases/latest"><img src="https://img.shields.io/badge/下载-APK%20v1.9-0B6BFF?style=flat-square&logo=android&logoColor=white" alt="Download APK"></a>
   <a href="#快速开始"><img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android"></a>
   <a href="#工作原理"><img src="https://img.shields.io/badge/Java-100%25-E76F00?style=flat-square&logo=openjdk&logoColor=white" alt="Java"></a>
-  <a href="https://github.com/fuoins/flow-assistant/releases"><img src="https://img.shields.io/badge/version-1.8-0B6BFF?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/fuoins/flow-assistant/releases"><img src="https://img.shields.io/badge/version-1.9-0B6BFF?style=flat-square" alt="Version"></a>
   <a href="#工作原理"><img src="https://img.shields.io/badge/依赖-0-0E9F6E?style=flat-square" alt="Dependencies"></a>
   <a href="#声明"><img src="https://img.shields.io/badge/用途-学习交流-64748B?style=flat-square" alt="License"></a>
   <br><br>
@@ -104,7 +104,7 @@ flowchart LR
 
 ### 直接安装
 
-前往 [Releases](https://github.com/fuoins/flow-assistant/releases/latest) 下载 `flow-assistant-v1.8.apk`，在手机上允许「安装未知来源应用」后安装。首次启动需要登录中国移动账号（短信验证码）。
+前往 [Releases](https://github.com/fuoins/flow-assistant/releases/latest) 下载 `flow-assistant.apk`，在手机上允许「安装未知来源应用」后安装。首次启动需要登录中国移动账号（短信验证码）。
 
 ### 环境要求
 
@@ -211,7 +211,8 @@ flow-assistant/
 
 ## 版本记录
 
-- **v1.8**（当前）— 测速源选择器改为卡片式弹窗单选；应用更名「流量助手」
+- **v1.9**（当前）— 新增启动/刷新加载超时与错误兜底，修复一直卡在「正在加载」及文字截断问题；接入 GitHub Actions 自动打包发布
+- **v1.8** — 测速源选择器改为卡片式弹窗单选；应用更名「流量助手」
 - **v1.7** — 原生滑块验证；全新会话防风控；登录与启动取数的进度反馈
 
 ## 声明

@@ -1,0 +1,68 @@
+name: Build & Release APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0'
+
+      - name: 生成 debug 签名
+        run: |
+          keytool -genkeypair -v -keystore debug.keystore -alias debug \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: 编译打包 APK
+        run: |
+          set -e
+          JAR="$ANDROID_HOME/platforms/android-34/android.jar"
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          rm -rf obj dex build && mkdir -p obj dex build
+          javac -classpath "$JAR" -d obj src/com/cmcc/flowapp/*.java
+          "$BT/d8" --release --lib "$JAR" --output dex $(find obj -name '*.class')
+          "$BT/aapt2" compile --dir res -o build/res.zip
+          "$BT/aapt2" link -o build/base.apk -I "$JAR" \
+            --manifest AndroidManifest.xml build/res.zip --auto-add-overlay
+          (cd dex && zip -q ../build/base.apk classes.dex)
+          "$BT/zipalign" -f 4 build/base.apk build/aligned.apk
+          "$BT/apksigner" sign --ks debug.keystore --ks-key-alias debug \
+            --ks-pass pass:android --key-pass pass:android \
+            --out build/flow-assistant.apk build/aligned.apk
+          ls -lh build/flow-assistant.apk
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: flow-assistant-apk
+          path: build/flow-assistant.apk
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/flow-assistant.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
