@@ -348,6 +348,11 @@ public class MainActivity extends Activity {
         String pageError = result.optString("error", "").trim();
         latestSmsSeconds = smsSeconds;
         if (smsSeconds > 0) syncSmsCountdown(smsSeconds);
+        if (authenticated) {
+            pendingSms = pendingLogin = false;
+            smsCommanded = loginCommanded = false;
+            if (smsInput != null && smsInput.length() > 0) smsInput.setText("");
+        }
         if (pendingSms && smsSeconds > 0) {
             probeDeadline = System.currentTimeMillis() + 60000L;
             pendingSms = false;
