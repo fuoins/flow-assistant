@@ -1,10 +1,10 @@
 <div align="center">
   <img src="assets/banner.png" alt="流量助手 · Flow Assistant" width="100%">
   <br><br>
-  <a href="https://github.com/fuoins/flow-assistant/releases/latest"><img src="https://img.shields.io/badge/下载-APK%20v1.9.2-0B6BFF?style=flat-square&logo=android&logoColor=white" alt="Download APK"></a>
+  <a href="https://github.com/fuoins/flow-assistant/releases/latest"><img src="https://img.shields.io/badge/下载-APK%20v1.9.3-0B6BFF?style=flat-square&logo=android&logoColor=white" alt="Download APK"></a>
   <a href="#快速开始"><img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android"></a>
   <a href="#工作原理"><img src="https://img.shields.io/badge/Java-100%25-E76F00?style=flat-square&logo=openjdk&logoColor=white" alt="Java"></a>
-  <a href="https://github.com/fuoins/flow-assistant/releases"><img src="https://img.shields.io/badge/version-1.9.2-0B6BFF?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/fuoins/flow-assistant/releases"><img src="https://img.shields.io/badge/version-1.9.3-0B6BFF?style=flat-square" alt="Version"></a>
   <a href="#工作原理"><img src="https://img.shields.io/badge/依赖-0-0E9F6E?style=flat-square" alt="Dependencies"></a>
   <a href="#声明"><img src="https://img.shields.io/badge/用途-学习交流-64748B?style=flat-square" alt="License"></a>
   <br><br>
@@ -30,7 +30,7 @@
 | 模块 | 做什么 | 实现要点 |
 | :--- | :--- | :--- |
 | **余量** | 登录后自动拉取全部套餐，按类别汇总剩余 / 总量 / 已用 | 隐藏 WebView 复用官方会话，注入 JS 解析套餐 DOM |
-| **登录** | 手机号 + 短信验证码，滑块验证在原生层完成 | 复刻官方 `tianai-captcha`：取图 → 拖动轨迹 → 校验 → 回调发码 |
+| **登录** | 手机号 + 短信验证码，拼图验证在官方登录页完成 | 使用官方 WebView 流程，不复制验证码接口或模拟校验请求 |
 | **测速** | 4 线程并发下载，实时统计已用流量，达阈值自动停止 | `HttpURLConnection` + 64 KB 缓冲，禁用缓存、随机参数防命中 |
 | **领取** | 内置辽宁活动与全国定向流量入口，配置可远程整体替换 | 外部 `flow.json` 下发 `claim_groups` |
 
@@ -52,7 +52,7 @@
 ### 登录与会话
 
 - **仅短信验证码登录**，服务协议默认勾选，手机号可记住并在下次启动时回填。
-- **原生滑块验证**：`POST /genCaptcha` 取背景图与拼图块，本地记录拖动轨迹（含起止时间戳与位移百分比），`POST /check` 提交，成功后回调官方 `sendsms` 触发短信。
+- **官方滑块验证**：获取短信验证码时显示中国移动官方登录页，由用户在该页面完成拼图；若页面改版导致自动触发失败，可直接点击页面上的“获取短信随机码”。
 - **登录态本地保存**：Cookie 备份到 `SharedPreferences("flow_cookies")`，启动时回填到 `touch / login / wap / shop` 等域名，有效则直接进入余量页。
 - **跳转看门狗**：提交登录后约 7.2 秒仍未落到目标页，直接跳转流量页，避免卡在官方跳转链。
 
@@ -96,7 +96,7 @@ flowchart LR
 
 ### 三个取舍
 
-- **用隐藏 WebView 而不是逆向接口**：登录、风控、取数全部跟随官方流程，页面改版时只需调整抽取选择器，不必重写鉴权。
+- **登录验证跟随官方 WebView**：不复刻验证码接口或自动重放校验请求；余量查询仍通过隐藏 WebView 复用官方会话，页面改版时只需调整数据抽取选择器。
 - **纯原生、零依赖**：单文件 `Activity` 手写布局，不引第三方 UI / 网络 / 图片库，APK 体积与启动开销都可控。
 - **没有后端**：手机号、Cookie、配置全部留在本机，测速源与领取入口通过一份公开 JSON 下发。
 
@@ -211,7 +211,8 @@ flow-assistant/
 
 ## 版本记录
 
-- **v1.9.2**（当前）— 未登录直接进登录页不绕流量页；加载超时回登录页；登录流程加超时兜底并优化跳转链
+- **v1.9.3**（当前）— 短信验证码改用官方可见登录页完成拼图，移除对官网内部滑块接口的运行时依赖
+- **v1.9.2** — 未登录直接进登录页不绕流量页；加载超时回登录页；登录流程加超时兜底并优化跳转链
 - **v1.9.1** — 修复登录后误报「网络加载失败」；流量页加载失败自动重试 2 次，错误提示带错误码
 - **v1.9** — 新增启动/刷新加载超时与错误兜底，修复一直卡在「正在加载」及文字截断问题；接入 GitHub Actions 自动打包发布
 - **v1.8** — 测速源选择器改为卡片式弹窗单选；应用更名「流量助手」

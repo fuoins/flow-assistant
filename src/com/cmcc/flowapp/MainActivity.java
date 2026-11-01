@@ -5,8 +5,6 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -20,7 +18,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
@@ -36,7 +33,6 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -62,8 +58,8 @@ import java.util.regex.Pattern;
 /**
  * 流量查询助手 v1.7
  * - 原生登录界面（仿官方登录页元素：短信/密码双tab、验证码、协议、记住账号）
- * - 隐藏 WebView 后台自动完成官方登录（自动填表提交，风控滑块时才短暂显示官方页兜底）
- * - 全程不显示官方登录网页与流量详情网页
+ * - 登录使用官方 WebView；短信验证码与风控验证由官方页面处理
+ * - 余量查询仍使用隐藏 WebView，不显示流量详情网页
  * - 消耗流量上方区域（头部+汇总卡）压缩至约半屏
  */
 public class MainActivity extends Activity {
@@ -114,28 +110,13 @@ public class MainActivity extends Activity {
     private final boolean[] agree1 = {true}, agree2 = {true}, remember = {true};
     private boolean pendingSms = false, pendingLogin = false, pollRunning = false;
     private int pollTicks = 0;
-    private boolean sliderSeen = false;
-    private long sliderSince = 0;
-    private int sliderRetries = 0;
     private Runnable loginWatchdog;
     private int loginWatchdogTicks = 0;
 
-    /* 原生滑块（把官方 tianai-captcha 搬成原生控件，官方页全程隐藏） */
     /* 过渡加载层 */
     private FrameLayout loadingOverlay;
     private TextView loadingText;
 
-    private FrameLayout sliderOverlay;    private ImageView sliderBgImg, sliderTplImg;
-    private View sliderBtn;
-    private TextView sliderTitle, sliderTips;
-    private String captchaId;
-    private int bgW, bgH, tplW, tplH;
-    private float sliderScale = 1f;
-    private int sliderMaxDx = 0;
-    private long sliderStartTime;
-    private float sliderStartRawX;
-    private boolean sliderSubmitting = false;
-    private List<JSONObject> trackArr = new ArrayList<>();
     private String lastUrl = "";
     private Runnable pollRunnable;
     private int countdownLeft = 0;
@@ -196,7 +177,6 @@ public class MainActivity extends Activity {
         restoreCookies();
         buildNativeScreen();
         buildLoginScreen();
-        buildSliderOverlay();
         buildLoadingOverlay();
         fetchConfig();
 
@@ -211,6 +191,19 @@ public class MainActivity extends Activity {
             web.loadUrl(LOGIN_URL);
             showLoginScreen();
         }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (web != null && web.getVisibility() == View.VISIBLE && (pendingSms || pendingLogin)) {
+            stopPoll();
+            pendingSms = false;
+            pendingLogin = false;
+            resetLoginBtns();
+            showLoginScreen();
+            return;
+        }
+        super.onBackPressed();
     }
 
     /* ================= 默认配置（外部配置拉取失败时兜底） ================= */
@@ -286,8 +279,9 @@ public class MainActivity extends Activity {
                     resetLoginBtns();
                     web.loadUrl(FLOW_URL);
                 } else if (isLoginPage(url)) {
-                    if (pendingSms) { requestCaptcha(); }
-                    else if (pendingLogin) { pendingLogin = false; submitLogin(); }
+                    if (pendingSms) {
+                        if (!pollRunning) startOfficialSmsFlow();
+                    } else if (pendingLogin) { pendingLogin = false; submitLogin(); }
                     else showLoginScreen();
                 }
             }
@@ -605,7 +599,7 @@ public class MainActivity extends Activity {
 
     private static final String GETSMS_JS =
             "(function(){var n=document.getElementById('sms_nav');if(n&&n.className.indexOf('on')<0)n.click();" +
-            "var p=document.getElementById('p_phone');if(p)p.value='%1$s';" +
+            "var p=document.getElementById('p_phone');if(p){p.value='%1$s';p.dispatchEvent(new Event('input',{bubbles:true}));p.dispatchEvent(new Event('change',{bubbles:true}));}" +
             "var el=document.getElementById('getSMSpwd');if(el){el.click();return 'ok';}return 'no';})()";
     private static final String PWD_GETSMS_JS =
             "(function(){var n=document.getElementById('account_nav');if(n&&n.className.indexOf('on')<0)n.click();" +
@@ -642,6 +636,7 @@ public class MainActivity extends Activity {
         String phone = phoneInput.getText().toString().trim();
         if (phone.length() != 11) { loginError("请输入正确的11位手机号码"); return; }
         loginError("");
+        stopPoll();
         pendingSms = true;
         pendingLogin = false;
         getSmsBtn.setEnabled(false);
@@ -670,6 +665,16 @@ public class MainActivity extends Activity {
         String phone = phoneInput.getText().toString().trim();
         String js = smsMode ? String.format(GETSMS_JS, phone) : String.format(PWD_GETSMS_JS, phone);
         eval(js);
+    }
+
+    /** 官方页面负责加载并校验验证码；不复制其内部 /genCaptcha 与 /check 协议。 */
+    private void startOfficialSmsFlow() {
+        showWebOnly();
+        startPoll();
+        submitGetSms();
+        Toast.makeText(MainActivity.this,
+                "请在中国移动官方页面完成滑块验证；如未自动触发，请点页面上的“获取短信随机码”",
+                Toast.LENGTH_LONG).show();
     }
 
     private void doLogin() {
@@ -726,13 +731,11 @@ public class MainActivity extends Activity {
     private void startPoll() {
         pollRunning = true;
         pollTicks = 0;
-        sliderSeen = false;
-        sliderRetries = 0;
         if (pollRunnable == null) {
             pollRunnable = new Runnable() {
                 @Override public void run() {
                     if (!pollRunning) return;
-                    if (++pollTicks > 60) {
+                    if (++pollTicks > 180) {
                         stopPoll();
                         resetLoginBtns();
                         pendingSms = false;
@@ -753,17 +756,17 @@ public class MainActivity extends Activity {
                                     boolean sent = o.optBoolean("sent");
 
                                     if (captcha || protect) {
-                                        // 风控出现：保持官方页可见，等用户完成
-                                        sliderSeen = true;
-                                        sliderSince = System.currentTimeMillis();
+                                        // 官方挑战始终留在可交互的官方 WebView 中，不自动重放请求。
                                         if (loginScreen != null && loginScreen.getVisibility() == View.VISIBLE) {
                                             showWebOnly();
                                             Toast.makeText(MainActivity.this,
-                                                    captcha ? "请完成滑动验证" : "请完成登录保护验证",
+                                                    captcha ? "请在官方页面完成滑动验证" : "请在官方页面完成登录保护验证",
                                                     Toast.LENGTH_SHORT).show();
                                         }
-                                    } else if (sliderSeen) {
-                                        // 滑块已滑完：留在官方页继续等待发送/登录结果，无结果自动重试
+                                    } else {
+                                        if (!pendingSms && web != null && web.getVisibility() == View.VISIBLE) {
+                                            showLoginScreen();
+                                        }
                                         if (!err.isEmpty()) {
                                             stopPoll();
                                             resetLoginBtns();
@@ -779,44 +782,6 @@ public class MainActivity extends Activity {
                                             pendingSms = false;
                                             eval(CLOSE_SEND_JS);
                                             showLoginScreen();
-                                            Toast.makeText(MainActivity.this,
-                                                    "验证码已发送，请注意查收", Toast.LENGTH_SHORT).show();
-                                            startCountdown();
-                                            return;
-                                        }
-                                        if (System.currentTimeMillis() - sliderSince > 9000) {
-                                            if (sliderRetries < 3) {
-                                                sliderRetries++;
-                                                sliderSince = System.currentTimeMillis();
-                                                if (pendingSms) submitGetSms();
-                                                else if (pendingLogin) submitLogin();
-                                            } else {
-                                                boolean smsFlow = pendingSms;
-                                                stopPoll();
-                                                resetLoginBtns();
-                                                pendingSms = false;
-                                                pendingLogin = false;
-                                                showLoginScreen();
-                                                loginError(smsFlow ? "验证码发送失败，请重试" : "登录失败，请重试");
-                                                return;
-                                            }
-                                        }
-                                    } else {
-                                        // 未出现风控：直接返回结果
-                                        if (web != null && web.getVisibility() == View.VISIBLE) {
-                                            showLoginScreen();
-                                        }
-                                        if (!err.isEmpty()) {
-                                            stopPoll();
-                                            resetLoginBtns();
-                                            loginError(err);
-                                            return;
-                                        }
-                                        if (pendingSms && sent) {
-                                            stopPoll();
-                                            resetLoginBtns();
-                                            pendingSms = false;
-                                            eval(CLOSE_SEND_JS);
                                             Toast.makeText(MainActivity.this,
                                                     "验证码已发送，请注意查收", Toast.LENGTH_SHORT).show();
                                             startCountdown();
@@ -857,7 +822,6 @@ public class MainActivity extends Activity {
                         pendingSms = false;
                         pendingLogin = false;
                         eval(CLOSE_SEND_JS);
-                        closeSlider();
                         showLoginScreen();
                         Toast.makeText(MainActivity.this,
                                 "验证码已发送，请注意查收", Toast.LENGTH_SHORT).show();
@@ -869,7 +833,6 @@ public class MainActivity extends Activity {
                     pendingSms = false;
                     pendingLogin = false;
                     eval(CLOSE_SEND_JS);
-                    closeSlider();
                     showLoginScreen();
                     if (m.contains("一分钟以后再试") || m.contains("暂时不能发送")
                             || m.contains("发送次数过于频繁") || m.contains("发送失败")
@@ -887,402 +850,6 @@ public class MainActivity extends Activity {
 
     private void eval(String js, android.webkit.ValueCallback<String> cb) {
         if (web != null) web.evaluateJavascript(js, cb);
-    }
-
-    /* ================= 原生滑块验证（替代官方滑块，官方页全程隐藏） =================
-     * 官方滑块协议（tac.min.js）：
-     *   POST /genCaptcha  -> {id, captcha:{type, backgroundImage, templateImage}}
-     *   POST /check       -> body {id, data:{bgImageWidth, bgImageHeight,
-     *        templateImageWidth, templateImageHeight, startTime, stopTime, trackList}}
-     *   响应 {code:200} 成功，data.id 作为验证凭证；随后官方 sendsms(id) 发短信。
-     * 请求在隐藏 WebView 的页面环境里 fetch（同源、同 cookie、同指纹上下文）。
-     */
-
-    private void buildSliderOverlay() {
-        sliderOverlay = new FrameLayout(this);
-        sliderOverlay.setBackgroundColor(0x99000000);
-        sliderOverlay.setVisibility(View.GONE);
-
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(strokeBg(0xFFFFFFFF, dp(16), 0xFFE0E0E0, 1));
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        cp.gravity = Gravity.CENTER;
-        cp.setMargins(dp(40), 0, dp(40), 0);
-        sliderOverlay.addView(card, cp);
-
-        /* 标题行 */
-        LinearLayout titleRow = new LinearLayout(this);
-        titleRow.setOrientation(LinearLayout.HORIZONTAL);
-        titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        card.addView(titleRow);
-
-        sliderTitle = new TextView(this);
-        sliderTitle.setText("拖动滑块完成拼图");
-        sliderTitle.setTextSize(15);
-        sliderTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        sliderTitle.setTextColor(INK);
-        titleRow.addView(sliderTitle, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-
-        TextView refreshBtn = new TextView(this);
-        refreshBtn.setText("↻");
-        refreshBtn.setTextSize(16);
-        refreshBtn.setTextColor(SUB);
-        refreshBtn.setPadding(dp(10), dp(4), dp(4), dp(4));
-        refreshBtn.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                if (!sliderSubmitting) requestCaptcha();
-            }
-        });
-        titleRow.addView(refreshBtn);
-
-        TextView closeBtn = new TextView(this);
-        closeBtn.setText("✕");
-        closeBtn.setTextSize(16);
-        closeBtn.setTextColor(SUB);
-        closeBtn.setPadding(dp(10), dp(4), dp(2), dp(4));
-        closeBtn.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                pendingSms = false;
-                closeSlider();
-                resetLoginBtns();
-                loginError("");
-            }
-        });
-        titleRow.addView(closeBtn);
-
-        /* 图片区（宽固定，高加载后按比例设置） */
-        final FrameLayout imgBox = new FrameLayout(this);
-        final int imgW = getResources().getDisplayMetrics().widthPixels - dp(40) * 2 - dp(32);
-        LinearLayout.LayoutParams ibp = new LinearLayout.LayoutParams(imgW, dp(150));
-        ibp.topMargin = dp(10);
-        card.addView(imgBox, ibp);
-
-        sliderBgImg = new ImageView(this);
-        sliderBgImg.setScaleType(ImageView.ScaleType.FIT_XY);
-        imgBox.addView(sliderBgImg, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        sliderTplImg = new ImageView(this);
-        sliderTplImg.setScaleType(ImageView.ScaleType.FIT_XY);
-        imgBox.addView(sliderTplImg, new FrameLayout.LayoutParams(dp(52), dp(52)));
-
-        /* 滑轨 + 拖动按钮 */
-        final FrameLayout track = new FrameLayout(this);
-        LinearLayout.LayoutParams trp = new LinearLayout.LayoutParams(imgW, dp(44));
-        trp.topMargin = dp(8);
-        card.addView(track, trp);
-
-        View trackBg = new View(this);
-        trackBg.setBackground(strokePillBg(0xFFF2F2F2, dp(22), 0xFFDDDDDD, 1));
-        track.addView(trackBg, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
-
-        sliderBtn = new View(this);
-        sliderBtn.setBackground(pillBg(0xFF1E88E5, dp(8)));
-        track.addView(sliderBtn, new FrameLayout.LayoutParams(dp(42), dp(42)));
-        sliderBtn.setOnTouchListener(sliderTouch);
-
-        sliderTips = new TextView(this);
-        sliderTips.setText("请按住滑块向右拖动");
-        sliderTips.setTextSize(12);
-        sliderTips.setTextColor(FAINT);
-        sliderTips.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams tipP = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tipP.topMargin = dp(6);
-        card.addView(sliderTips, tipP);
-
-        container.addView(sliderOverlay, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-    }
-
-    private final View.OnTouchListener sliderTouch = new View.OnTouchListener() {
-        @Override public boolean onTouch(View v, MotionEvent ev) {
-            if (sliderSubmitting) return true;
-            switch (ev.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    sliderStartRawX = ev.getRawX();
-                    sliderStartTime = System.currentTimeMillis();
-                    trackArr.clear();
-                    sliderTips.setTextColor(FAINT);
-                    sliderTips.setText("请按住滑块向右拖动");
-                    return true;
-                case MotionEvent.ACTION_MOVE: {
-                    float dx = ev.getRawX() - sliderStartRawX;
-                    if (dx < 0) dx = 0;
-                    if (dx > sliderMaxDx) dx = sliderMaxDx;
-                    sliderBtn.setTranslationX(dx);
-                    sliderTplImg.setTranslationX(dx);
-                    try {
-                        JSONObject pt = new JSONObject();
-                        pt.put("x", Math.round(dx / sliderScale));
-                        pt.put("y", 0);
-                        pt.put("type", "move");
-                        pt.put("t", System.currentTimeMillis() - sliderStartTime);
-                        trackArr.add(pt);
-                    } catch (Exception ignored) {}
-                    return true;
-                }
-                case MotionEvent.ACTION_UP:
-                    sliderSubmitting = true;
-                    submitCheck();
-                    return true;
-                case MotionEvent.ACTION_CANCEL:
-                    sliderSubmitting = false;
-                    return true;
-            }
-            return true;
-        }
-    };
-
-    /** 从隐藏 WebView 页面环境请求滑块数据（同源同 cookie） */
-    private void requestCaptcha() {
-        if (sliderOverlay == null) return;
-        if (sliderOverlay.getVisibility() == View.VISIBLE && sliderSubmitting) return; // 防重入
-        sliderOverlay.setVisibility(View.VISIBLE);
-        sliderTitle.setText("拖动滑块完成拼图");
-        sliderTips.setTextColor(FAINT);
-        sliderTips.setText("正在加载验证…");
-        sliderSubmitting = true;
-        sliderBtn.setTranslationX(0);
-        sliderTplImg.setTranslationX(0);
-        sliderBgImg.setImageDrawable(null);
-        sliderTplImg.setImageDrawable(null);
-        eval("(function(){fetch('/genCaptcha',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})" +
-                ".then(function(r){return r.json()})" +
-                ".then(function(d){if(d&&d.captcha){d.captcha.backgroundImage=new URL(d.captcha.backgroundImage,location.href).href;" +
-                "d.captcha.templateImage=new URL(d.captcha.templateImage,location.href).href;}window.__tacCaptcha=d;})" +
-                ".catch(function(e){window.__tacCaptcha={err:1};});})()");
-        readCaptcha(0);
-    }
-
-    private void readCaptcha(final int tries) {
-        if (tries > 16) { sliderFail("验证码加载超时，请点刷新重试", false); return; }
-        uiHandler.postDelayed(new Runnable() {
-            @Override public void run() {
-                if (sliderOverlay == null || sliderOverlay.getVisibility() != View.VISIBLE) return;
-                eval("JSON.stringify(window.__tacCaptcha)", new android.webkit.ValueCallback<String>() {
-                    @Override public void onReceiveValue(String v) {
-                        String s = v == null ? "" : v.trim();
-                        if (s.isEmpty() || "null".equals(s) || "undefined".equals(s)) {
-                            readCaptcha(tries + 1);
-                            return;
-                        }
-                        try {
-                            JSONObject o = new JSONObject(jsString(v));
-                            JSONObject cap = o.optJSONObject("captcha");
-                            String id = o.optString("id", "");
-                            String bg = cap == null ? "" : cap.optString("backgroundImage", "");
-                            String tpl = cap == null ? "" : cap.optString("templateImage", "");
-                            if (id.isEmpty() || bg.isEmpty() || tpl.isEmpty()) {
-                                readCaptcha(tries + 1);
-                                return;
-                            }
-                            loadCaptcha(bg, tpl, id);
-                        } catch (Exception e) { readCaptcha(tries + 1); }
-                    }
-                });
-            }
-        }, 500);
-    }
-
-    private void loadCaptcha(final String bgUrl, final String tplUrl, final String id) {
-        new Thread(new Runnable() {
-            @Override public void run() {
-                final Bitmap bg = loadBitmap(bgUrl);
-                final Bitmap tpl = loadBitmap(tplUrl);
-                uiHandler.post(new Runnable() {
-                    @Override public void run() {
-                        if (bg == null || tpl == null) {
-                            sliderFail("验证码图片加载失败，请点刷新重试", false);
-                            return;
-                        }
-                        captchaId = id;
-                        bgW = bg.getWidth();
-                        bgH = bg.getHeight();
-                        tplW = tpl.getWidth();
-                        tplH = tpl.getHeight();
-                        int imgW = sliderBgImg.getWidth();
-                        if (imgW <= 0) imgW = bgW;
-                        sliderScale = (float) imgW / bgW;
-                        int imgH = Math.round(bgH * sliderScale);
-                        int tplDispW = Math.round(tplW * sliderScale);
-                        int tplDispH = Math.round(tplH * sliderScale);
-                        sliderMaxDx = imgW - tplDispW;
-                        if (sliderMaxDx < 0) sliderMaxDx = 0;
-
-                        ViewGroup.LayoutParams p = sliderBgImg.getLayoutParams();
-                        p.height = imgH;
-                        sliderBgImg.setLayoutParams(p);
-                        sliderBgImg.setImageBitmap(bg);
-
-                        FrameLayout.LayoutParams tp = (FrameLayout.LayoutParams) sliderTplImg.getLayoutParams();
-                        tp.width = tplDispW;
-                        tp.height = tplDispH;
-                        tp.leftMargin = 0;
-                        tp.topMargin = (imgH - tplDispH) / 2;
-                        sliderTplImg.setLayoutParams(tp);
-                        sliderTplImg.setImageBitmap(tpl);
-
-                        sliderBtn.setTranslationX(0);
-                        sliderTplImg.setTranslationX(0);
-                        sliderSubmitting = false;
-                        sliderTips.setTextColor(FAINT);
-                        sliderTips.setText("请按住滑块向右拖动");
-                    }
-                });
-            }
-        }).start();
-    }
-
-    /** 松手后提交轨迹到 /check（在隐藏 WebView 页面环境 fetch） */
-    private void submitCheck() {
-        try {
-            JSONObject data = new JSONObject();
-            data.put("bgImageWidth", bgW);
-            data.put("bgImageHeight", bgH);
-            data.put("templateImageWidth", tplW);
-            data.put("templateImageHeight", tplH);
-            data.put("startTime", isoTime(sliderStartTime));
-            data.put("stopTime", isoTime(System.currentTimeMillis()));
-            data.put("trackList", new JSONArray(trackArr));
-            double lastX = 0;
-            if (!trackArr.isEmpty()) {
-                JSONObject last = trackArr.get(trackArr.size() - 1);
-                lastX = last.optDouble("x", 0);
-            }
-            data.put("movePercent", bgW > 0 ? Math.round(lastX * 10000 / bgW) / 10000.0 : 0);
-            data.put("clickCount", 0);
-            data.put("end", 242);
-            JSONObject body = new JSONObject();
-            body.put("id", captchaId);
-            body.put("data", data);
-            String bodyStr = body.toString();
-            sliderTips.setTextColor(FAINT);
-            sliderTips.setText("验证中…");
-            final String js = "(function(){fetch('/check',{method:'POST',headers:{'Content-Type':'application/json'},body:'"
-                    + bodyStr + "'}).then(function(r){return r.json()})" +
-                    ".then(function(d){window.__tacCheck=d;})" +
-                    ".catch(function(e){window.__tacCheck={code:-1};});})()";
-            eval(js);
-            readCheckResult(0);
-        } catch (Exception e) {
-            sliderFail("提交失败，请重试", true);
-        }
-    }
-
-    private String isoTime(long ms) {
-        java.text.SimpleDateFormat f =
-                new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);
-        f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
-        return f.format(new java.util.Date(ms));
-    }
-
-    private void readCheckResult(final int tries) {
-        if (tries > 14) { sliderFail("验证超时，请重试", true); return; }
-        uiHandler.postDelayed(new Runnable() {
-            @Override public void run() {
-                if (sliderOverlay == null || sliderOverlay.getVisibility() != View.VISIBLE) return;
-                eval("JSON.stringify(window.__tacCheck)", new android.webkit.ValueCallback<String>() {
-                    @Override public void onReceiveValue(String v) {
-                        String s = v == null ? "" : v.trim();
-                        if (s.isEmpty() || "null".equals(s) || "undefined".equals(s)) {
-                            readCheckResult(tries + 1);
-                            return;
-                        }
-                        try {
-                            JSONObject o = new JSONObject(jsString(v));
-                            if (o.optInt("code") == 200) {
-                                String cid = captchaId;
-                                JSONObject dd = o.optJSONObject("data");
-                                if (dd != null && !dd.optString("id", "").isEmpty()) cid = dd.optString("id");
-                                sliderSuccess(cid);
-                            } else {
-                                sliderFail("验证失败，请重试", true);
-                            }
-                        } catch (Exception e) { readCheckResult(tries + 1); }
-                    }
-                });
-            }
-        }, 500);
-    }
-
-    /** 验证成功：把手机号填进官方页并调用官方 sendsms(id)，官方流程发短信，alert 由 handleJsAlert 拦截 */
-    private void sliderSuccess(String id) {
-        final String phone = phoneInput.getText().toString().trim();
-        sliderTips.setTextColor(0xFF2E7D32);
-        sliderTips.setText("验证成功，正在发送验证码…");
-        String js = "(function(){var p=document.getElementById('p_phone');if(p)p.value='" + phone + "';" +
-                "var s=document.getElementById('sms_nav');if(s&&s.className.indexOf('on')<0)s.click();" +
-                "if(window.sendsms){sendsms('" + id + "');return 'ok';}return 'no';})()";
-        eval(js, new android.webkit.ValueCallback<String>() {
-            @Override public void onReceiveValue(String v) {
-                if (v != null && v.contains("no")) {
-                    sliderFail("页面未就绪，请重试", true);
-                } else {
-                    sliderTips.setText("验证码发送中…");
-                }
-            }
-        });
-    }
-
-    private void sliderFail(final String msg, final boolean autoRetry) {
-        sliderSubmitting = false;
-        uiHandler.post(new Runnable() {
-            @Override public void run() {
-                if (sliderOverlay == null || sliderOverlay.getVisibility() != View.VISIBLE) return;
-                sliderTips.setTextColor(0xFFE53935);
-                sliderTips.setText(msg);
-                if (autoRetry) {
-                    uiHandler.postDelayed(new Runnable() {
-                        @Override public void run() {
-                            if (sliderOverlay != null && sliderOverlay.getVisibility() == View.VISIBLE
-                                    && !sliderSubmitting) requestCaptcha();
-                        }
-                    }, 1200);
-                }
-            }
-        });
-    }
-
-    private void closeSlider() {
-        if (sliderOverlay != null) sliderOverlay.setVisibility(View.GONE);
-        sliderSubmitting = false;
-    }
-
-    private Bitmap loadBitmap(String urlStr) {
-        if (urlStr != null && urlStr.startsWith("data:image")) {
-            int idx = urlStr.indexOf("base64,");
-            if (idx > 0) {
-                try {
-                    byte[] b = android.util.Base64.decode(
-                            urlStr.substring(idx + 7), android.util.Base64.DEFAULT);
-                    return BitmapFactory.decodeByteArray(b, 0, b.length);
-                } catch (Exception e) {
-                    return null;
-                }
-            }
-        }
-        java.io.InputStream in = null;
-        try {
-            java.net.URL u = new java.net.URL(urlStr);
-            HttpURLConnection c = (HttpURLConnection) u.openConnection();
-            c.setConnectTimeout(8000);
-            c.setReadTimeout(15000);
-            c.setInstanceFollowRedirects(true);
-            c.setRequestProperty("User-Agent",
-                    "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36");
-            in = c.getInputStream();
-            return BitmapFactory.decodeStream(in);
-        } catch (Exception e) {
-            return null;
-        } finally {
-            if (in != null) { try { in.close(); } catch (Exception ignored) {} }
-        }
     }
 
     private String jsString(String v) {
