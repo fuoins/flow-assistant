@@ -15,6 +15,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
+import android.net.http.SslError;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -24,7 +25,11 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.JsResult;
+import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -156,6 +161,19 @@ public class MainActivity extends Activity {
     private int extractTries = 0;
     private int autoReloads = 0;
 
+    /* ---------- 加载超时兜底：页面加载失败/卡死时，避免一直停在加载层 ---------- */
+    private final Runnable loadTimeoutRunnable = new Runnable() {
+        @Override public void run() {
+            hideLoading();
+            if (!hasSavedCookie()) {
+                showLoginScreen();
+            } else {
+                showNative();
+                if (statusLine != null) statusLine.setText("加载超时，请点「刷新」重试");
+            }
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -180,6 +198,7 @@ public class MainActivity extends Activity {
 
         showNative();
         showLoading("正在加载流量数据…");
+        armLoadTimeout();
         web.loadUrl(FLOW_URL);   // cookie 有效则后台直取，无效则落到登录页（隐藏）
     }
 
@@ -236,6 +255,7 @@ public class MainActivity extends Activity {
                     pendingSms = false;
                     pendingLogin = false;
                     extractTries = 0;
+                    disarmLoadTimeout();
                     showLoading("正在获取流量数据…");
                     scheduleExtract();
                 } else if (isWapHome(url)) {
@@ -252,6 +272,35 @@ public class MainActivity extends Activity {
                     else if (pendingLogin) { pendingLogin = false; submitLogin(); }
                     else showLoginScreen();
                 }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request.isForMainFrame()) {
+                    disarmLoadTimeout();
+                    hideLoading();
+                    showNative();
+                    if (statusLine != null) statusLine.setText("网络加载失败，请检查网络后点「刷新」重试");
+                }
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
+                if (request.isForMainFrame() && errorResponse != null && errorResponse.getStatusCode() >= 400) {
+                    disarmLoadTimeout();
+                    hideLoading();
+                    showNative();
+                    if (statusLine != null) statusLine.setText("页面加载失败(" + errorResponse.getStatusCode() + ")，请点「刷新」重试");
+                }
+            }
+
+            @Override
+            public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
+                handler.cancel();
+                disarmLoadTimeout();
+                hideLoading();
+                showNative();
+                if (statusLine != null) statusLine.setText("安全连接失败，请检查系统时间与网络后重试");
             }
         });
         web.setWebChromeClient(new WebChromeClient() {
@@ -277,7 +326,9 @@ public class MainActivity extends Activity {
     }
 
     private boolean isLoginPage(String url) {
-        return url != null && url.startsWith("https://login.10086.cn/html/login/");
+        if (url == null) return false;
+        return url.startsWith("https://login.10086.cn/html/login/")
+                || url.startsWith("http://login.10086.cn/html/login/");
     }
 
     private boolean onLoginPageNow() {
@@ -285,6 +336,7 @@ public class MainActivity extends Activity {
     }
 
     private void showLoginScreen() {
+        disarmLoadTimeout();
         hideLoading();
         if (web != null) web.setVisibility(View.INVISIBLE);
         if (nativeScreen != null) nativeScreen.setVisibility(View.GONE);
@@ -321,7 +373,7 @@ public class MainActivity extends Activity {
         loadingText.setTextColor(SUB);
         loadingText.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp2.topMargin = dp(14);
         box.addView(loadingText, lp2);
         FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(
@@ -340,6 +392,25 @@ public class MainActivity extends Activity {
 
     private void hideLoading() {
         if (loadingOverlay != null) loadingOverlay.setVisibility(View.GONE);
+    }
+
+    /* 启动/刷新取数时挂一个 20 秒看门狗，加载成功或失败都会解除 */
+    private void armLoadTimeout() {
+        uiHandler.removeCallbacks(loadTimeoutRunnable);
+        uiHandler.postDelayed(loadTimeoutRunnable, 20000);
+    }
+
+    private void disarmLoadTimeout() {
+        uiHandler.removeCallbacks(loadTimeoutRunnable);
+    }
+
+    private boolean hasSavedCookie() {
+        try {
+            String c = getSharedPreferences(PREFS, MODE_PRIVATE).getString("cookies", "");
+            return c != null && !c.isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /* ================= 原生登录界面（仿官方元素） ================= */
@@ -1652,6 +1723,7 @@ public class MainActivity extends Activity {
         statusLine.setText("正在刷新流量余量…");
         web.setVisibility(View.INVISIBLE);
         nativeScreen.setVisibility(View.VISIBLE);
+        armLoadTimeout();
         web.loadUrl(FLOW_URL);
     }
 
@@ -1706,6 +1778,9 @@ public class MainActivity extends Activity {
                         autoReloads++;
                         web.loadUrl(FLOW_URL);
                     } else {
+                        disarmLoadTimeout();
+                        hideLoading();
+                        showNative();
                         statusLine.setText("未获取到数据，请点「刷新」重试");
                     }
                 } catch (Exception e) {
@@ -1715,6 +1790,9 @@ public class MainActivity extends Activity {
                             @Override public void run() { extractData(); }
                         }, 1500);
                     } else {
+                        disarmLoadTimeout();
+                        hideLoading();
+                        showNative();
                         statusLine.setText("解析失败，请点「刷新」重试");
                     }
                 }
@@ -1763,6 +1841,7 @@ public class MainActivity extends Activity {
             g.items.add(it);
         }
 
+        disarmLoadTimeout();
         hideLoading();
         showNative();
         summaryBox.removeAllViews();
