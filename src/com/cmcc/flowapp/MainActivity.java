@@ -160,6 +160,7 @@ public class MainActivity extends Activity {
     /* ---------- 提取 ---------- */
     private int extractTries = 0;
     private int autoReloads = 0;
+    private int flowLoadFailCount = 0;
 
     /* ---------- 加载超时兜底：页面加载失败/卡死时，避免一直停在加载层 ---------- */
     private final Runnable loadTimeoutRunnable = new Runnable() {
@@ -255,6 +256,7 @@ public class MainActivity extends Activity {
                     pendingSms = false;
                     pendingLogin = false;
                     extractTries = 0;
+                    flowLoadFailCount = 0;
                     disarmLoadTimeout();
                     showLoading("正在获取流量数据…");
                     scheduleExtract();
@@ -276,22 +278,37 @@ public class MainActivity extends Activity {
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) {
-                    disarmLoadTimeout();
-                    hideLoading();
-                    showNative();
-                    if (statusLine != null) statusLine.setText("网络加载失败，请检查网络后点「刷新」重试");
+                if (request == null || !request.isForMainFrame()) return;
+                String u = request.getUrl() != null ? request.getUrl().toString() : "";
+                // 只处理流量查询页的失败，登录页/跳转中间页的错误交给正常流程处理
+                if (!u.contains("flowquery")) return;
+                int code = error != null ? error.getErrorCode() : 0;
+                if (flowLoadFailCount < 2) {
+                    flowLoadFailCount++;
+                    web.loadUrl(FLOW_URL);   // 自动重试
+                    return;
                 }
+                disarmLoadTimeout();
+                hideLoading();
+                showNative();
+                if (statusLine != null) statusLine.setText("网络加载失败(" + code + ")，请检查网络后点「刷新」重试");
             }
 
             @Override
             public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
-                if (request.isForMainFrame() && errorResponse != null && errorResponse.getStatusCode() >= 400) {
-                    disarmLoadTimeout();
-                    hideLoading();
-                    showNative();
-                    if (statusLine != null) statusLine.setText("页面加载失败(" + errorResponse.getStatusCode() + ")，请点「刷新」重试");
+                if (request == null || !request.isForMainFrame()) return;
+                String u = request.getUrl() != null ? request.getUrl().toString() : "";
+                if (!u.contains("flowquery")) return;
+                int code = errorResponse != null ? errorResponse.getStatusCode() : 0;
+                if (flowLoadFailCount < 2) {
+                    flowLoadFailCount++;
+                    web.loadUrl(FLOW_URL);
+                    return;
                 }
+                disarmLoadTimeout();
+                hideLoading();
+                showNative();
+                if (statusLine != null) statusLine.setText("页面加载失败(" + code + ")，请点「刷新」重试");
             }
 
             @Override
