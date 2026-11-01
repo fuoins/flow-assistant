@@ -1224,9 +1224,10 @@ public class MainActivity extends Activity {
     /* ================= 余量刷新（始终仅访问指定流量入口） ================= */
 
     private void refreshFlow() {
-        statusLine.setText("正在刷新流量余量…");
+        boolean hasCurrentData = lastItems != null && !lastItems.isEmpty();
+        statusLine.setText(hasCurrentData ? "正在刷新，暂时保留当前数据…" : "正在刷新流量余量…");
         showNative();
-        loadEntry("正在刷新流量数据…", true);
+        loadEntry("正在刷新流量数据…", !hasCurrentData);
     }
 
     /* ================= 汇总与展示 ================= */

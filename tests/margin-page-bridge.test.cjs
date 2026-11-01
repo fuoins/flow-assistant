@@ -62,6 +62,17 @@ test('startup probes the existing session before showing the SMS login form', ()
   assert.match(onCreate, /loadEntry\("正在检查登录状态…",\s*true\)/);
 });
 
+test('manual refresh keeps current data visible while fetching updated values', () => {
+  const start = activity.indexOf('private void refreshFlow()');
+  const end = activity.indexOf('/* ================= 汇总与展示 ================= */', start);
+  assert.ok(start >= 0 && end > start, 'Could not locate manual refresh');
+  const refresh = activity.slice(start, end);
+  assert.match(refresh, /lastItems\s*!=\s*null\s*&&\s*!lastItems\.isEmpty\(\)/);
+  assert.match(refresh, /showNative\s*\(\)/);
+  assert.match(refresh, /loadEntry\("正在刷新流量数据…",\s*!hasCurrentData\)/);
+  assert.doesNotMatch(refresh, /showLoading\s*\(/);
+});
+
 class FakeEvent {
   constructor(type, init) {
     this.type = type;
