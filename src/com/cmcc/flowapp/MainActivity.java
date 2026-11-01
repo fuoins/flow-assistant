@@ -56,7 +56,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 流量查询助手 v1.7
+ * 流量查询助手 v1.9.4
  * - 原生登录界面（仿官方登录页元素：短信/密码双tab、验证码、协议、记住账号）
  * - 登录使用官方 WebView；短信验证码与风控验证由官方页面处理
  * - 余量查询仍使用隐藏 WebView，不显示流量详情网页
@@ -66,7 +66,7 @@ public class MainActivity extends Activity {
 
     private static final String LOGIN_URL =
             "https://login.10086.cn/html/login/touch.html?channelID=12022&backUrl=https://wap.10086.cn/bj/index_100_100.html";
-    private static final String FLOW_URL = "https://touch.10086.cn/i/mobile/flowquery.html";
+    private static final String FLOW_URL = "https://wx.10086.cn/cmcc-service/app-pages/main/marginQuery?customize_path_param=72&channelId=P00000132553&yx=1418961133";
     private static final String TOUCH_HOME = "https://touch.10086.cn/i/mobile/home.html";
     private static final String CONFIG_URL = "https://zy520.de5.net/flow.json";
     private static final String UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
@@ -253,7 +253,7 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 lastUrl = url == null ? "" : url;
                 saveCookies();
-                if (isPage(url, "touch.10086.cn/i/mobile/flowquery.html")) {
+                if (isFlowPage(url)) {
                     stopPoll();
                     resetLoginBtns();
                     pendingSms = false;
@@ -290,8 +290,8 @@ public class MainActivity extends Activity {
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 if (request == null || !request.isForMainFrame()) return;
                 String u = request.getUrl() != null ? request.getUrl().toString() : "";
-                // 只处理流量查询页的失败，登录页/跳转中间页的错误交给正常流程处理
-                if (!u.contains("flowquery")) return;
+                // 只处理余量查询 H5 的失败，登录页/跳转中间页的错误交给正常流程处理
+                if (!isFlowPage(u)) return;
                 int code = error != null ? error.getErrorCode() : 0;
                 if (flowLoadFailCount < 2) {
                     flowLoadFailCount++;
@@ -308,7 +308,7 @@ public class MainActivity extends Activity {
             public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
                 if (request == null || !request.isForMainFrame()) return;
                 String u = request.getUrl() != null ? request.getUrl().toString() : "";
-                if (!u.contains("flowquery")) return;
+                if (!isFlowPage(u)) return;
                 int code = errorResponse != null ? errorResponse.getStatusCode() : 0;
                 if (flowLoadFailCount < 2) {
                     flowLoadFailCount++;
@@ -350,6 +350,11 @@ public class MainActivity extends Activity {
     private boolean isPage(String url, String hostPath) {
         if (url == null) return false;
         return url.startsWith("http://" + hostPath) || url.startsWith("https://" + hostPath);
+    }
+
+    private boolean isFlowPage(String url) {
+        return url != null && url.startsWith(
+                "https://wx.10086.cn/cmcc-service/app-pages/main/marginQuery");
     }
 
     private boolean isLoginPage(String url) {
@@ -1331,25 +1336,58 @@ public class MainActivity extends Activity {
     /* ================= 数据提取 ================= */
 
     private static final String EXTRACT_JS =
-            "(function(){" +
-            "var out=[];" +
-            "var lis=document.querySelectorAll('li.fn-li-plan');" +
-            "for(var i=0;i<lis.length;i++){" +
-            "var li=lis[i];" +
-            "var n=li.querySelector('.fn-big-tit');" +
-            "var c=li.querySelector('.fn-sm-tit');" +
-            "var f=li.querySelectorAll('.ll-flux');" +
-            "var name=n?n.textContent.replace(/^\\s+|\\s+$/g,''):'';" +
-            "var cat=c?c.textContent.replace(/^\\s+|\\s+$/g,''):'';" +
-            "var used=f.length>0?f[0].textContent.replace(/^\\s+|\\s+$/g,''):'';" +
-            "var remain=f.length>1?f[1].textContent.replace(/^\\s+|\\s+$/g,''):'';" +
-            "var total='';" +
-            "var top=li.querySelector('.fn-top');" +
-            "if(top){var m=top.textContent.match(/总量:\\s*([\\d.]+)\\s*(KB|MB|GB)/i);if(m)total=m[1]+m[2];}" +
-            "if(name||cat)out.push({name:name,cat:cat,used:used,remain:remain,total:total});" +
+            "(function(){try{" +
+            "var el=document.querySelector('#app'),vm=el&&el.__vue__,i=0;" +
+            "while(vm&&!vm.$store&&vm.$parent&&i++<8)vm=vm.$parent;" +
+            "var st=vm&&vm.$store&&vm.$store.state;" +
+            "var mod=st&&st.planRemainQryInfo;var q=mod&&mod.newPlanRemainQry;" +
+            "var sh=st&&st.userShareInfo||{},iq=st&&st.flowInfoQry||{};" +
+            "if(!q||mod.newPlanRemainQryLoadState!=='loadCompleted')return '[]';" +
+            "if((sh.shareUserInfoLoadState&&sh.shareUserInfoLoadState!=='loadCompleted')||(iq.flowInfoQryLoadState&&iq.flowInfoQryLoadState!=='loadCompleted'))return '[]';" +
+            "var out=[],seen={};" +
+            "function pick(o,keys){for(var j=0;j<keys.length;j++)if(o[keys[j]]!=null)return o[keys[j]];return null;}" +
+            "function amount(v,u){if(v==null||v==='')return '';if(v==='N')return '不限';if(v==='--')return '--';" +
+            "if(typeof v==='object'&&v.value!=null){u=v.unit||u;v=v.value;}" +
+            "if(typeof v==='string'&&/[\\d.]+\\s*(KB|MB|GB|TB)/i.test(v))return v.replace(/\\s+/g,'');" +
+            "var n=Number(v);if(!isFinite(n))return '';u=String(u||'').toUpperCase();" +
+            "if(u==='04'||u==='4'||u==='GB')return n+'GB';" +
+            "if(u==='03'||u==='3'||u==='1'||u==='MB')return n+'MB';" +
+            "if(u==='KB'||u==='TB')return n+u;return '';" +
             "}" +
+            "function hasAmount(o,d){if(!o||typeof o!=='object'||d>5)return false;" +
+            "if(o.usedRes!=null||o.remainRes!=null||o.totalRes!=null||o.usageAmount!=null||o.usedFlows!=null||o.leftFlows!=null||o.allFlows!=null||o.visitFlows!=null||o.shareUsedRes!=null||o.shareRemainRes!=null||o.shareTotalRes!=null)return true;" +
+            "var ks=Object.keys(o);for(var j=0;j<ks.length;j++){var v=o[ks[j]];if(v&&typeof v==='object'){if(Array.isArray(v)){for(var k=0;k<v.length;k++)if(hasAmount(v[k],d+1))return true;}else if(hasAmount(v,d+1))return true;}}return false;}" +
+            "function add(name,cat,used,remain,total,u){var a=amount(used,u),b=amount(remain,u),c=amount(total,u);" +
+            "if(!name||(!a&&!b&&!c))return;var key=[cat,name,a,b,c].join('|');if(seen[key])return;seen[key]=1;out.push({name:String(name),cat:cat,used:a,remain:b,total:c});}" +
+            "function walk(x,cat,base,u,d){if(!x||typeof x!=='object'||d>9)return;" +
+            "if(Array.isArray(x)){for(var z=0;z<x.length;z++)walk(x[z],cat,base,u,d+1);return;}" +
+            "var name=pick(x,['planName','flowName','outPlanTitle','standardProductName','productName','packageName','resourcesName','name'])||base||'';" +
+            "var unit=x.unit||x.flowUnit||x.resourcesUnit||u||'';" +
+            "var used=pick(x,['usedRes','shareUsedRes','usedFlows','visitFlows','usageAmount']);" +
+            "var remain=pick(x,['remainRes','shareRemainRes','leftFlows']);" +
+            "var total=pick(x,['totalRes','shareTotalRes','allFlows']);" +
+            "var child=false;var ks=Object.keys(x);for(var j=0;j<ks.length;j++){var v=x[ks[j]];if(v&&typeof v==='object'&&hasAmount(v,0)){child=true;break;}}" +
+            "if(!child)add(name,cat,used,remain,total,unit);" +
+            "for(var j=0;j<ks.length;j++){var v=x[ks[j]];if(v&&typeof v==='object')walk(v,cat,name,unit,d+1);}" +
+            "}" +
+            "var roots=q.planRemianFlowListRes||[];if(!Array.isArray(roots))roots=[roots];" +
+            "for(var r=0;r<roots.length;r++){var p=roots[r]||{},gs=p.planRemianFlowRes||[];" +
+            "for(var g=0;g<gs.length;g++){var f=gs[g],t=String(f.flowtype||'');" +
+            "var cat=t==='0'?'国内通用流量':t==='1'?'国内定向流量':t==='2'?'国内其他流量':t==='3'?'WLAN流量':'流量';" +
+            "walk(f.planRemianFlowInfoRes||[],cat,'','',0);}" +
+            "walk(p.outPlanInfoRes||[],'套餐外流量','套餐外流量','03',0);" +
+            "walk(p.planRemianOtherListRes||[],'其他流量','其他流量','',0);}" +
+            "walk(q.planRemianOtherListRes||[],'其他流量','其他流量','',0);" +
+            "var so=sh.shareFlowOverallData||{},shareStart=out.length;" +
+            "function share(o,n){if(!o)return;var a=o.overallUsedData,b=o.overallRemainData,c=o.overallTotalData;" +
+            "add(n,'共享流量',a&&a.value,b&&b.value,c&&c.value,(a&&a.unit)||(b&&b.unit)||'04');}" +
+            "walk(sh.shareFlowDetailData||[],'共享流量','共享流量','04',0);" +
+            "if(out.length===shareStart){share(so.mainShareFlowOverallData,'主卡共享流量');share(so.subShareFlowOverallData,'副卡共享流量');}" +
+            "walk(iq.nationalFlowPacketUsageInfoList||[],'国际流量','国际流量','03',0);" +
+            "walk(iq.nationalStandardTariffUsageInfoList||[],'国际流量','境外漫游用量','03',0);" +
+            "Object.keys(st).forEach(function(k){if(/day.*flow|flow.*day/i.test(k))walk(st[k],'每日流量','每日流量','03',0);});" +
             "return JSON.stringify(out);" +
-            "})()";
+            "}catch(e){return '[]';}})()";
 
     private void scheduleExtract() {
         uiHandler.postDelayed(new Runnable() {
@@ -1370,7 +1408,7 @@ public class MainActivity extends Activity {
                     JSONArray arr = new JSONArray(json);
                     if (arr.length() > 0) {
                         renderResult(arr);
-                    } else if (extractTries < 5) {
+                    } else if (extractTries < 12) {
                         extractTries++;
                         uiHandler.postDelayed(new Runnable() {
                             @Override public void run() { extractData(); }
@@ -1385,7 +1423,7 @@ public class MainActivity extends Activity {
                         statusLine.setText("未获取到数据，请点「刷新」重试");
                     }
                 } catch (Exception e) {
-                    if (extractTries < 5) {
+                    if (extractTries < 12) {
                         extractTries++;
                         uiHandler.postDelayed(new Runnable() {
                             @Override public void run() { extractData(); }
@@ -1427,12 +1465,18 @@ public class MainActivity extends Activity {
         for (FlowItem it : lastItems) {
             String key;
             if (it.cat != null && it.cat.contains("通用")) key = "通用流量";
-            else if ("APP专属流量".equals(it.cat)) {
+            else if (it.cat != null && (it.cat.contains("定向") || "APP专属流量".equals(it.cat))) {
                 if (it.name != null && it.name.contains("咪咕视频")) key = "咪咕视频";
                 else if (it.name != null && it.name.contains("云盘")) key = "移动云盘";
                 else if (it.name != null && it.name.contains("咪咕快游")) key = "咪咕快游";
                 else key = "其他APP专属";
-            } else key = "其他流量";
+            } else if (it.cat != null && it.cat.contains("共享")) key = "共享流量";
+            else if (it.cat != null && it.cat.contains("国际")) key = "国际流量";
+            else if (it.cat != null && it.cat.contains("WLAN")) key = "WLAN流量";
+            else if (it.cat != null && it.cat.contains("每日")) key = "每日流量";
+            else if (it.cat != null && it.cat.contains("套餐外")) key = "套餐外流量";
+            else if (it.cat != null && it.cat.contains("国内其他")) key = "国内其他流量";
+            else key = "其他流量";
             GroupSum g = groups.get(key);
             if (g == null) { g = new GroupSum(); g.key = key; groups.put(key, g); }
             g.totalGB += toGB(it.total);
@@ -1448,7 +1492,14 @@ public class MainActivity extends Activity {
         summaryBox.removeAllViews();
 
         double allTotal = 0, allRemain = 0, allUsed = 0;
-        for (GroupSum g : groups.values()) { allTotal += g.totalGB; allRemain += g.remainGB; allUsed += g.usedGB; }
+        for (Map.Entry<String, GroupSum> e : groups.entrySet()) {
+            String key = e.getKey();
+            if ("共享流量".equals(key) || "国际流量".equals(key) || "每日流量".equals(key)
+                    || "套餐外流量".equals(key)) continue;
+            allTotal += e.getValue().totalGB;
+            allRemain += e.getValue().remainGB;
+            allUsed += e.getValue().usedGB;
+        }
 
         // 头部 hero
         String[] hero = splitNumUnit(allRemain);
@@ -1458,8 +1509,8 @@ public class MainActivity extends Activity {
         headerBar.setRatio(allTotal > 0 ? (float) (allRemain / allTotal) : 0f);
 
         // 总合计卡（全宽，压缩）
-        summaryBox.addView(makeWideCard("总合计", "合", PRIMARY,
-                "已消耗 " + fmt(allUsed) + " · " + groups.size() + " 类流量包",
+        summaryBox.addView(makeWideCard("基础套餐合计", "合", PRIMARY,
+                "已消耗 " + fmt(allUsed) + " · 另列共享、国际、日用等流量信息",
                 allTotal, allRemain, PRIMARY));
 
         // 两列小卡
@@ -1472,8 +1523,15 @@ public class MainActivity extends Activity {
 
         double appTotal = 0, appRemain = 0;
         int appCount = 0;
-        for (Map.Entry<String, GroupSum> e : groups.entrySet())
-            if (!"通用流量".equals(e.getKey())) { appTotal += e.getValue().totalGB; appRemain += e.getValue().remainGB; appCount += e.getValue().count; }
+        for (Map.Entry<String, GroupSum> e : groups.entrySet()) {
+            String key = e.getKey();
+            if ("咪咕视频".equals(key) || "移动云盘".equals(key) || "咪咕快游".equals(key)
+                    || "其他APP专属".equals(key)) {
+                appTotal += e.getValue().totalGB;
+                appRemain += e.getValue().remainGB;
+                appCount += e.getValue().count;
+            }
+        }
         if (appCount > 0) {
             mini.add(makeMiniCard("APP专属", "专", ORANGE, appCount + "个定向包",
                     appTotal, appRemain, null, ORANGE));
@@ -1486,6 +1544,12 @@ public class MainActivity extends Activity {
             if (key.contains("咪咕视频")) { color = RED; glyph = "视"; }
             else if (key.contains("云盘")) { color = ORANGE; glyph = "盘"; }
             else if (key.contains("快游")) { color = PURPLE; glyph = "游"; }
+            else if (key.contains("共享")) { color = PRIMARY; glyph = "享"; }
+            else if (key.contains("国际")) { color = PURPLE; glyph = "境"; }
+            else if (key.contains("每日")) { color = GREEN; glyph = "日"; }
+            else if (key.contains("WLAN")) { color = PRIMARY; glyph = "网"; }
+            else if (key.contains("套餐外")) { color = RED; glyph = "外"; }
+            else if (key.contains("其他")) { glyph = "他"; }
             String shortName = key;
             if (key.contains("其他APP")) shortName = "其他定向";
             mini.add(makeMiniCard(shortName, glyph, color, e.getValue().count + "包",
@@ -1511,12 +1575,13 @@ public class MainActivity extends Activity {
 
     private double toGB(String s) {
         if (s == null) return 0;
-        Matcher m = Pattern.compile("([\\d.]+)\\s*(KB|MB|GB)", Pattern.CASE_INSENSITIVE).matcher(s.trim());
+        Matcher m = Pattern.compile("([\\d.]+)\\s*(KB|MB|GB|TB)", Pattern.CASE_INSENSITIVE).matcher(s.trim());
         if (!m.find()) return 0;
         double v = Double.parseDouble(m.group(1));
         String u = m.group(2).toUpperCase();
         if (u.equals("KB")) return v / 1024 / 1024;
         if (u.equals("MB")) return v / 1024;
+        if (u.equals("TB")) return v * 1024;
         return v;
     }
 
@@ -1644,8 +1709,28 @@ public class MainActivity extends Activity {
         arrow.setTextColor(FAINT);
         head.addView(arrow);
 
+        boolean unlimited = false;
+        double usageOnly = 0;
+        if (items != null) {
+            for (FlowItem item : items) {
+                if ((item.remain != null && item.remain.contains("不限"))
+                        || (item.total != null && item.total.contains("不限"))) unlimited = true;
+                usageOnly += toGB(item.used);
+            }
+        }
+        String remLabel = fmt(remain);
+        String totalLabel = "总量 " + fmt(total);
+        if (total <= 0.000001 && items != null) {
+            if (unlimited) {
+                remLabel = "不限";
+                totalLabel = "套餐含不限量数据";
+            } else if (usageOnly > 0) {
+                remLabel = fmt(usageOnly);
+                totalLabel = "已用（无总量字段）";
+            } else if (remain <= 0) totalLabel = "总量未提供";
+        }
         TextView rem = new TextView(this);
-        rem.setText(fmt(remain));
+        rem.setText(remLabel);
         rem.setTextSize(14);
         rem.setTypeface(Typeface.DEFAULT_BOLD);
         rem.setTextColor(INK);
@@ -1653,7 +1738,7 @@ public class MainActivity extends Activity {
         card.addView(rem);
 
         TextView tot = new TextView(this);
-        tot.setText("总量 " + fmt(total));
+        tot.setText(totalLabel);
         tot.setTextSize(9);
         tot.setTextColor(FAINT);
         tot.setPadding(0, dp(1), 0, 0);
@@ -1680,9 +1765,10 @@ public class MainActivity extends Activity {
                 line.setTextColor(INK);
                 det.addView(line);
                 TextView s2 = new TextView(this);
+                String usedStr = (it.used == null || it.used.isEmpty()) ? "—" : it.used;
                 String remainStr = (it.remain == null || it.remain.isEmpty()) ? "—" : it.remain;
                 String totalStr = (it.total == null || it.total.isEmpty()) ? "—" : it.total;
-                s2.setText("剩余 " + remainStr + " · " + totalStr);
+                s2.setText("已用 " + usedStr + " · 剩余 " + remainStr + " · 总量 " + totalStr);
                 s2.setTextSize(9);
                 s2.setTextColor(SUB);
                 s2.setPadding(0, dp(1), 0, dp(4));
@@ -2032,14 +2118,35 @@ public class MainActivity extends Activity {
     /* ================= 登录态 Cookie 备份/恢复 ================= */
 
     private static final String PREFS = "flow_cookies";
+    private static final String[] COOKIE_HOSTS = {
+            "https://touch.10086.cn", "https://wx.10086.cn", "https://login.10086.cn",
+            "https://wap.10086.cn", "http://wap.10086.cn", "https://www.10086.cn",
+            "https://shop.10086.cn", "https://app.online-cmcc.cn", "https://app.10086.cn",
+            "https://h.app.coc.10086.cn"
+    };
 
     /** 把当前登录 Cookie 备份到 SharedPreferences，防 WebView 数据被系统清理 */
     private void saveCookies() {
         try {
-            String all = CookieManager.getInstance().getCookie("https://touch.10086.cn");
-            if (all == null || all.isEmpty()) return;
+            CookieManager cm = CookieManager.getInstance();
+            LinkedHashMap<String, String> pairs = new LinkedHashMap<>();
+            for (String host : COOKIE_HOSTS) {
+                String all = cm.getCookie(host);
+                if (all == null || all.isEmpty()) continue;
+                for (String pair : all.split(";")) {
+                    String p = pair.trim();
+                    int eq = p.indexOf('=');
+                    if (eq > 0) pairs.put(p.substring(0, eq).trim(), p.substring(eq + 1).trim());
+                }
+            }
+            if (pairs.isEmpty()) return;
+            StringBuilder all = new StringBuilder();
+            for (Map.Entry<String, String> entry : pairs.entrySet()) {
+                if (all.length() > 0) all.append("; ");
+                all.append(entry.getKey()).append('=').append(entry.getValue());
+            }
             getSharedPreferences(PREFS, MODE_PRIVATE)
-                    .edit().putString("cookies", all).apply();
+                    .edit().putString("cookies", all.toString()).apply();
         } catch (Exception ignored) {}
     }
 
@@ -2052,13 +2159,10 @@ public class MainActivity extends Activity {
             CookieManager cm = CookieManager.getInstance();
             cm.setAcceptCookie(true);
             String[] pairs = all.split(";");
-            String[] hosts = {"https://touch.10086.cn", "https://login.10086.cn",
-                    "https://wap.10086.cn", "http://wap.10086.cn",
-                    "https://www.10086.cn", "https://shop.10086.cn"};
             for (String p : pairs) {
                 p = p.trim();
                 if (p.isEmpty()) continue;
-                for (String h : hosts) {
+                for (String h : COOKIE_HOSTS) {
                     try { cm.setCookie(h, p); } catch (Exception ignored) {}
                 }
             }
